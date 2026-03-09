@@ -1,0 +1,1 @@
+"""Bundled qrenderdoc extension assets."""

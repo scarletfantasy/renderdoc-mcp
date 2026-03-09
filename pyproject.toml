@@ -1,0 +1,44 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "renderdoc-mcp"
+version = "0.1.0"
+description = "A Windows-first MCP server for inspecting RenderDoc captures."
+readme = "README.md"
+requires-python = ">=3.10"
+dependencies = [
+  "mcp>=1.26.0,<2.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=9.0.0,<10.0.0",
+]
+
+[project.scripts]
+renderdoc-mcp = "renderdoc_mcp.__main__:main"
+renderdoc-install-extension = "renderdoc_mcp.install_cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+renderdoc_mcp = [
+  "qrenderdoc_extension/renderdoc_mcp_bridge/__init__.py",
+  "qrenderdoc_extension/renderdoc_mcp_bridge/extension.json",
+]
+
+[tool.uv]
+package = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+  "integration: requires local RenderDoc and a replayable .rdc capture",
+]

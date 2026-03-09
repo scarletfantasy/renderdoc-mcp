@@ -1,0 +1,9 @@
+.pytest_cache/
+__pycache__/
+.coverage
+.venv/
+.codex_tmp_deps/
+build/
+dist/
+src/*.egg-info/
+*.pyc
