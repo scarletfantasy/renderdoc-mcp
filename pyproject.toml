@@ -39,6 +39,8 @@ package = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+addopts = "--basetemp=.pytest_tmp"
+norecursedirs = [".pytest_tmp", "pytest-cache-files-*"]
 markers = [
   "integration: requires local RenderDoc and a replayable .rdc capture",
 ]

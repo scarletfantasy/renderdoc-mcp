@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge import frame_analysis
+from renderdoc_mcp.analysis import frame_analysis
 
 
 def _resource(name: str) -> dict[str, str]:

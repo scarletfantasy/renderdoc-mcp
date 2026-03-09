@@ -9,6 +9,8 @@ from renderdoc_mcp.paths import extension_install_dir, ui_config_path, user_qren
 
 EXTENSION_PACKAGE = "renderdoc_mcp.qrenderdoc_extension"
 EXTENSION_NAME = "renderdoc_mcp_bridge"
+SHARED_ANALYSIS_PACKAGE = "renderdoc_mcp.analysis"
+SHARED_ANALYSIS_MODULE = "frame_analysis.py"
 
 
 def _copy_tree(src: Path, dst: Path) -> None:
@@ -24,9 +26,16 @@ def install_extension() -> Path:
     source_root = resources.files(EXTENSION_PACKAGE).joinpath(EXTENSION_NAME)
     with resources.as_file(source_root) as source_dir:
         _copy_tree(source_dir, target_dir)
+    _sync_shared_analysis(target_dir)
 
     _ensure_always_load()
     return target_dir
+
+
+def _sync_shared_analysis(target_dir: Path) -> None:
+    source_module = resources.files(SHARED_ANALYSIS_PACKAGE).joinpath(SHARED_ANALYSIS_MODULE)
+    with resources.as_file(source_module) as source_file:
+        shutil.copy2(source_file, target_dir / SHARED_ANALYSIS_MODULE)
 
 
 def _ensure_always_load() -> None:

@@ -1,4 +1,6 @@
 .pytest_cache/
+.pytest_tmp/
+pytest-cache-files-*/
 __pycache__/
 .coverage
 .venv/

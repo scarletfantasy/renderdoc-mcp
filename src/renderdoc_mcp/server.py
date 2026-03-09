@@ -5,11 +5,13 @@ from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
+from renderdoc_mcp.bootstrap import prepare_runtime
 from renderdoc_mcp.service import RenderDocService
 
 
 @lru_cache(maxsize=1)
 def get_service() -> RenderDocService:
+    prepare_runtime()
     return RenderDocService()
 
 

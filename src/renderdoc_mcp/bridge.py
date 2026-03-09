@@ -20,7 +20,6 @@ from renderdoc_mcp.errors import (
     ReplayFailureError,
     RenderDocMCPError,
 )
-from renderdoc_mcp.install import install_extension
 from renderdoc_mcp.paths import resolve_qrenderdoc_path
 from renderdoc_mcp.protocol import BRIDGE_PROTOCOL_VERSION, close_socket, read_message, send_message
 
@@ -95,7 +94,6 @@ class QRenderDocBridge:
         if self._reader is not None and self._writer is not None and self._connection is not None:
             return
 
-        install_extension()
         self.close()
 
         listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
