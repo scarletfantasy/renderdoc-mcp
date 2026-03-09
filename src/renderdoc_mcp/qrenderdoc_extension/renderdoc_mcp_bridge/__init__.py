@@ -5,8 +5,17 @@ import time
 import traceback
 import ctypes
 
-import qrenderdoc as qrd
-import renderdoc as rd
+try:
+    import qrenderdoc as qrd
+    import renderdoc as rd
+except Exception:
+    qrd = None
+    rd = None
+
+try:
+    from . import frame_analysis as _frame_analysis
+except Exception:
+    import frame_analysis as _frame_analysis
 
 PROTOCOL_VERSION = 1
 CONNECT_RETRY_SECONDS = 20.0
@@ -230,6 +239,34 @@ def _serialize_event(api_event):
     if hasattr(api_event, "chunkIndex"):
         payload["chunk_index"] = int(getattr(api_event, "chunkIndex", 0))
     return payload
+
+
+def _serialize_action_analysis_node(ctx, action, structured_file):
+    name = action.GetName(structured_file) or action.customName or "Event {}".format(action.eventId)
+    return {
+        "event_id": int(action.eventId),
+        "action_id": int(action.actionId),
+        "name": name,
+        "custom_name": str(action.customName or ""),
+        "flags": _action_flags(action),
+        "child_count": len(action.children),
+        "is_fake_marker": bool(action.IsFakeMarker()),
+        "num_indices": int(action.numIndices),
+        "num_instances": int(action.numInstances),
+        "dispatch_dimension": [int(x) for x in action.dispatchDimension],
+        "dispatch_threads_dimension": [int(x) for x in action.dispatchThreadsDimension],
+        "outputs": [
+            {"resource_id": _resource_id(res_id), "resource_name": _resource_name(ctx, res_id)}
+            for res_id in action.outputs
+            if _resource_id(res_id)
+        ],
+        "depth_output": {
+            "resource_id": _resource_id(action.depthOut),
+            "resource_name": _resource_name(ctx, action.depthOut),
+        },
+        "parent_event_id": int(action.parent.eventId) if action.parent is not None else None,
+        "children": [_serialize_action_analysis_node(ctx, child, structured_file) for child in action.children],
+    }
 
 
 def _serialize_action(ctx, action, structured_file, depth, max_depth, name_filter_lower):
@@ -514,6 +551,7 @@ class BridgeClient(object):
         self.sock = None
         self.stop_event = threading.Event()
         self.thread = None
+        self.analysis_cache = _frame_analysis.AnalysisCache()
 
     def start(self):
         host = os.environ.get("RENDERDOC_MCP_BRIDGE_HOST")
@@ -567,6 +605,7 @@ class BridgeClient(object):
             except Exception:
                 pass
             self.sock = None
+        self.analysis_cache.clear()
 
     def _send(self, message):
         self.sock.send_text(json.dumps(message, separators=(",", ":")) + "\n")
@@ -634,6 +673,61 @@ class BridgeClient(object):
             "filename": self.ctx.GetCaptureFilename() if loaded else "",
         }
 
+    def _clear_analysis_cache(self):
+        self.analysis_cache.clear()
+
+    def _capture_cache_key(self):
+        capture_path = self.ctx.GetCaptureFilename()
+        stat_result = os.stat(capture_path)
+        return {
+            "capture_path": os.path.abspath(capture_path),
+            "file_size": int(stat_result.st_size),
+            "mtime_ns": int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1000000000))),
+        }
+
+    def _build_frame_metadata(self, controller):
+        frame = controller.GetFrameInfo()
+        actions = controller.GetRootActions()
+        return {
+            "capture": self._capture_status(),
+            "api": _api_name(controller),
+            "frame": {
+                "frame_number": int(frame.frameNumber),
+                "capture_time": int(frame.captureTime),
+                "compressed_file_size": int(frame.compressedFileSize),
+                "uncompressed_file_size": int(frame.uncompressedFileSize),
+                "persistent_size": int(frame.persistentSize),
+                "init_data_size": int(frame.initDataSize),
+                "debug_message_count": len(frame.debugMessages),
+            },
+            "statistics": _count_actions(actions),
+            "resource_counts": {
+                "textures": len(self.ctx.GetTextures()),
+                "buffers": len(self.ctx.GetBuffers()),
+            },
+        }
+
+    def _ensure_frame_analysis(self):
+        self._ensure_capture_loaded()
+        cache_key = self._capture_cache_key()
+        cached = self.analysis_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        payload = {}
+
+        def callback(controller):
+            structured_file = controller.GetStructuredFile()
+            root_actions = controller.GetRootActions()
+            metadata = self._build_frame_metadata(controller)
+            payload["value"] = _frame_analysis.build_frame_analysis(
+                [_serialize_action_analysis_node(self.ctx, action, structured_file) for action in root_actions],
+                metadata,
+            )
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return self.analysis_cache.store(cache_key, payload["value"])
+
     def _load_capture(self, capture_path):
         if not os.path.isfile(capture_path):
             raise RuntimeError(
@@ -646,6 +740,7 @@ class BridgeClient(object):
                 )
             )
 
+        self._clear_analysis_cache()
         self.ctx.LoadCapture(capture_path, rd.ReplayOptions(), capture_path, False, True)
         if not self.ctx.IsCaptureLoaded():
             raise RuntimeError(
@@ -657,9 +752,61 @@ class BridgeClient(object):
                     }
                 )
             )
+        self._clear_analysis_cache()
         return self._capture_status()
 
     def _get_capture_summary(self):
+        self._ensure_capture_loaded()
+        analysis = self._ensure_frame_analysis()
+        return {
+            "capture": analysis["capture"],
+            "api": analysis["api"],
+            "frame": analysis["frame"],
+            "statistics": analysis["statistics"],
+            "resource_counts": analysis["resource_counts"],
+        }
+
+    def _list_actions(self, max_depth, name_filter, cursor, limit):
+        analysis = self._ensure_frame_analysis()
+        return _frame_analysis.build_action_list_result(
+            analysis["action_tree"],
+            analysis["total_actions"],
+            max_depth=max_depth,
+            name_filter=name_filter,
+            cursor=cursor,
+            limit=limit,
+        )
+
+    def _analyze_frame(self):
+        analysis = self._ensure_frame_analysis()
+        return dict(analysis["analysis"])
+
+    def _list_passes(self, cursor, limit, category_filter, name_filter):
+        analysis = self._ensure_frame_analysis()
+        return _frame_analysis.list_passes(
+            analysis,
+            cursor=cursor,
+            limit=limit,
+            category_filter=category_filter,
+            name_filter=name_filter,
+        )
+
+    def _get_pass_details(self, pass_id):
+        analysis = self._ensure_frame_analysis()
+        details = _frame_analysis.get_pass_details(analysis, pass_id)
+        if details is None:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_pass_id",
+                        "message": "The supplied pass_id does not exist in the active frame analysis.",
+                        "details": {"pass_id": pass_id},
+                    }
+                )
+            )
+        return details
+
+    def _get_capture_summary_legacy(self):
         self._ensure_capture_loaded()
         summary = {
             "capture": self._capture_status(),
@@ -689,40 +836,6 @@ class BridgeClient(object):
 
         self.ctx.Replay().BlockInvoke(callback)
         return summary
-
-    def _list_actions(self, max_depth, name_filter):
-        self._ensure_capture_loaded()
-        response = {
-            "actions": [],
-            "count": 0,
-            "returned_count": 0,
-            "truncated": False,
-            "limit": ACTION_LIST_NODE_LIMIT,
-        }
-        filter_lower = name_filter.lower() if name_filter else None
-
-        def callback(controller):
-            structured_file = controller.GetStructuredFile()
-            root_actions = controller.GetRootActions()
-            budget = {
-                "remaining": ACTION_LIST_NODE_LIMIT,
-                "returned": 0,
-                "truncated": False,
-            }
-            payload = []
-            for action in root_actions:
-                serialized = _serialize_action_list_item(
-                    action, structured_file, 0, max_depth, filter_lower, budget
-                )
-                if serialized is not None:
-                    payload.append(serialized)
-            response["actions"] = payload
-            response["count"] = _count_actions(root_actions)["total_actions"]
-            response["returned_count"] = budget["returned"]
-            response["truncated"] = budget["truncated"]
-
-        self.ctx.Replay().BlockInvoke(callback)
-        return response
 
     def _get_action_details(self, event_id):
         self._ensure_capture_loaded()
@@ -812,7 +925,23 @@ class BridgeClient(object):
         if method == "get_capture_summary":
             return self._get_capture_summary()
         if method == "list_actions":
-            return self._list_actions(params.get("max_depth"), params.get("name_filter"))
+            return self._list_actions(
+                params.get("max_depth"),
+                params.get("name_filter"),
+                params.get("cursor"),
+                params.get("limit"),
+            )
+        if method == "analyze_frame":
+            return self._analyze_frame()
+        if method == "list_passes":
+            return self._list_passes(
+                params.get("cursor"),
+                params.get("limit"),
+                params.get("category_filter"),
+                params.get("name_filter"),
+            )
+        if method == "get_pass_details":
+            return self._get_pass_details(params.get("pass_id", ""))
         if method == "get_action_details":
             return self._get_action_details(int(params.get("event_id", 0)))
         if method == "get_pipeline_state":
@@ -821,6 +950,7 @@ class BridgeClient(object):
             return self._list_resources(params.get("kind", "all"), params.get("name_filter"))
         if method == "close_capture":
             if self.ctx.IsCaptureLoaded():
+                self._clear_analysis_cache()
                 self.ctx.CloseCapture()
             return {"closed": True}
         raise RuntimeError(

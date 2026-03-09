@@ -32,16 +32,63 @@ def renderdoc_get_capture_summary(capture_path: str) -> dict[str, Any]:
 
 
 @app.tool(
+    name="renderdoc_analyze_frame",
+    description="Analyze a RenderDoc capture into top-level passes, hotspots, and a tail UI/present chain.",
+    structured_output=True,
+)
+def renderdoc_analyze_frame(capture_path: str) -> dict[str, Any]:
+    return get_service().analyze_frame(capture_path)
+
+
+@app.tool(
     name="renderdoc_list_actions",
-    description="List the action tree in a RenderDoc capture, optionally filtered by depth or action name.",
+    description="List the action tree in a RenderDoc capture, optionally filtered by depth or action name, with optional flat pagination.",
     structured_output=True,
 )
 def renderdoc_list_actions(
     capture_path: str,
     max_depth: int | None = None,
     name_filter: str | None = None,
+    cursor: int | None = None,
+    limit: int | None = None,
 ) -> dict[str, Any]:
-    return get_service().list_actions(capture_path, max_depth=max_depth, name_filter=name_filter)
+    return get_service().list_actions(
+        capture_path,
+        max_depth=max_depth,
+        name_filter=name_filter,
+        cursor=cursor,
+        limit=limit,
+    )
+
+
+@app.tool(
+    name="renderdoc_list_passes",
+    description="List analyzed top-level frame passes with pagination and optional category or name filters.",
+    structured_output=True,
+)
+def renderdoc_list_passes(
+    capture_path: str,
+    cursor: int | None = None,
+    limit: int | None = None,
+    category_filter: str | None = None,
+    name_filter: str | None = None,
+) -> dict[str, Any]:
+    return get_service().list_passes(
+        capture_path,
+        cursor=cursor,
+        limit=limit,
+        category_filter=category_filter,
+        name_filter=name_filter,
+    )
+
+
+@app.tool(
+    name="renderdoc_get_pass_details",
+    description="Fetch the full analyzed pass structure for a previously listed pass_id.",
+    structured_output=True,
+)
+def renderdoc_get_pass_details(capture_path: str, pass_id: str) -> dict[str, Any]:
+    return get_service().get_pass_details(capture_path, pass_id)
 
 
 @app.tool(

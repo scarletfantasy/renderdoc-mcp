@@ -18,6 +18,7 @@ from renderdoc_mcp.errors import (
     CapturePathError,
     InvalidEventIDError,
     ReplayFailureError,
+    RenderDocMCPError,
 )
 from renderdoc_mcp.install import install_extension
 from renderdoc_mcp.paths import resolve_qrenderdoc_path
@@ -46,12 +47,14 @@ class QRenderDocBridge:
         self._reader: TextIO | None = None
         self._writer: TextIO | None = None
         self._current_capture: str | None = None
+        self._current_capture_token: tuple[int, int] | None = None
         self._log_path: str | None = None
         atexit.register(self.close)
 
     def close(self) -> None:
         with self._lock:
             self._current_capture = None
+            self._current_capture_token = None
             if self._writer is not None:
                 try:
                     self._writer.close()
@@ -70,13 +73,17 @@ class QRenderDocBridge:
             self._server_socket = None
 
     def ensure_capture_loaded(self, capture_path: str) -> dict[str, Any]:
-        normalized = str(Path(capture_path))
+        path = Path(capture_path)
+        normalized = str(path)
+        stat_result = path.stat()
+        capture_token = (int(stat_result.st_size), int(getattr(stat_result, "st_mtime_ns", int(stat_result.st_mtime * 1_000_000_000))))
         with self._lock:
             self.ensure_started()
-            if self._current_capture == normalized:
+            if self._current_capture == normalized and self._current_capture_token == capture_token:
                 return {"loaded": True, "filename": normalized}
             result = self._call_locked("load_capture", {"capture_path": normalized})
             self._current_capture = normalized
+            self._current_capture_token = capture_token
             return result
 
     def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
@@ -207,4 +214,4 @@ class QRenderDocBridge:
         if code == "bridge_disconnected":
             self.close()
             raise BridgeDisconnectedError()
-        raise ReplayFailureError(message, details)
+        raise RenderDocMCPError(str(code or "replay_failure"), message, details)

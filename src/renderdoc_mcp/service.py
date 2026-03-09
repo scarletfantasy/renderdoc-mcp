@@ -7,9 +7,15 @@ from typing import Any
 from renderdoc_mcp.bridge import QRenderDocBridge
 from renderdoc_mcp.errors import CapturePathError, ReplayFailureError, RenderDocMCPError
 from renderdoc_mcp.paths import ui_config_path
+from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge.frame_analysis import (
+    DEFAULT_PASS_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    PASS_CATEGORIES,
+)
 from renderdoc_mcp.uri import decode_capture_path, encode_capture_path
 
 SUPPORTED_RESOURCE_KINDS = {"all", "textures", "buffers"}
+SUPPORTED_PASS_CATEGORIES = set(PASS_CATEGORIES)
 NULL_LIKE_VALUES = {"", "null", "none", "undefined"}
 
 
@@ -24,10 +30,26 @@ class RenderDocService:
             lambda normalized: self._capture_tool(normalized, "get_capture_summary"),
         )
 
-    def list_actions(self, capture_path: str, max_depth: int | None = None, name_filter: str | None = None) -> dict[str, Any]:
+    def analyze_frame(self, capture_path: str) -> dict[str, Any]:
+        return self._run_tool(
+            capture_path,
+            "Analyzed the frame pass structure from RenderDoc.",
+            lambda normalized: self._capture_tool(normalized, "analyze_frame"),
+        )
+
+    def list_actions(
+        self,
+        capture_path: str,
+        max_depth: int | None = None,
+        name_filter: str | None = None,
+        cursor: int | str | None = None,
+        limit: int | str | None = None,
+    ) -> dict[str, Any]:
         try:
             max_depth = self._normalize_optional_int(max_depth, "max_depth")
             name_filter = self._normalize_optional_string(name_filter)
+            cursor = self._normalize_optional_int(cursor, "cursor")
+            limit = self._normalize_optional_int(limit, "limit")
         except RenderDocMCPError as exc:
             return self._error_response(capture_path, exc, "Action listing failed.")
 
@@ -38,16 +60,109 @@ class RenderDocService:
                 "Action listing failed.",
             )
 
+        if cursor is not None and cursor < 0:
+            return self._error_response(
+                capture_path,
+                ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": cursor}),
+                "Action listing failed.",
+            )
+
+        if limit is not None and (limit <= 0 or limit > MAX_PAGE_LIMIT):
+            return self._error_response(
+                capture_path,
+                ReplayFailureError(
+                    "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
+                    {"limit": limit},
+                ),
+                "Action listing failed.",
+            )
+
         params: dict[str, Any] = {}
         if max_depth is not None:
             params["max_depth"] = max_depth
         if name_filter:
             params["name_filter"] = name_filter
+        if cursor is not None:
+            params["cursor"] = cursor
+        if limit is not None:
+            params["limit"] = limit
 
         return self._run_tool(
             capture_path,
             "Listed capture actions.",
             lambda normalized: self._capture_tool(normalized, "list_actions", params),
+        )
+
+    def list_passes(
+        self,
+        capture_path: str,
+        cursor: int | str | None = None,
+        limit: int | str | None = None,
+        category_filter: str | None = None,
+        name_filter: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            cursor = self._normalize_optional_int(cursor, "cursor")
+            limit = self._normalize_optional_int(limit, "limit")
+            category_filter = self._normalize_optional_string(category_filter)
+            name_filter = self._normalize_optional_string(name_filter)
+        except RenderDocMCPError as exc:
+            return self._error_response(capture_path, exc, "Pass listing failed.")
+
+        if cursor is not None and cursor < 0:
+            return self._error_response(
+                capture_path,
+                ReplayFailureError("cursor must be greater than or equal to 0.", {"cursor": cursor}),
+                "Pass listing failed.",
+            )
+
+        if limit is not None and (limit <= 0 or limit > MAX_PAGE_LIMIT):
+            return self._error_response(
+                capture_path,
+                ReplayFailureError(
+                    "limit must be between 1 and {}.".format(MAX_PAGE_LIMIT),
+                    {"limit": limit},
+                ),
+                "Pass listing failed.",
+            )
+
+        if category_filter and category_filter not in SUPPORTED_PASS_CATEGORIES:
+            return self._error_response(
+                capture_path,
+                ReplayFailureError(
+                    "category_filter must be one of {}.".format(", ".join(sorted(SUPPORTED_PASS_CATEGORIES))),
+                    {"category_filter": category_filter},
+                ),
+                "Pass listing failed.",
+            )
+
+        params: dict[str, Any] = {"limit": limit or DEFAULT_PASS_PAGE_LIMIT}
+        if cursor is not None:
+            params["cursor"] = cursor
+        if category_filter:
+            params["category_filter"] = category_filter
+        if name_filter:
+            params["name_filter"] = name_filter
+
+        return self._run_tool(
+            capture_path,
+            "Listed analyzed frame passes.",
+            lambda normalized: self._capture_tool(normalized, "list_passes", params),
+        )
+
+    def get_pass_details(self, capture_path: str, pass_id: str) -> dict[str, Any]:
+        pass_id = self._normalize_optional_string(pass_id)
+        if not pass_id:
+            return self._error_response(
+                capture_path,
+                ReplayFailureError("pass_id must be a non-empty string."),
+                "Fetched pass details.",
+            )
+
+        return self._run_tool(
+            capture_path,
+            "Fetched pass details.",
+            lambda normalized: self._capture_tool(normalized, "get_pass_details", {"pass_id": pass_id}),
         )
 
     def get_action_details(self, capture_path: str, event_id: int) -> dict[str, Any]:
