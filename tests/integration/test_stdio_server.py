@@ -93,6 +93,16 @@ def test_stdio_tools_and_resources() -> None:
                     for item in pass_payload["passes"]
                 )
 
+                timed_analysis = await session.call_tool(
+                    "renderdoc_analyze_frame",
+                    {"capture_path": capture_path, "include_timing_summary": True},
+                )
+                assert not timed_analysis.isError
+                timed_analysis_payload = timed_analysis.structuredContent["result"]
+                assert "timing_available" in timed_analysis_payload
+                assert "counter_name" in timed_analysis_payload
+                assert "gpu_time_ms" in timed_analysis_payload["passes"][0]
+
                 listed_passes = await session.call_tool(
                     "renderdoc_list_passes",
                     {"capture_path": capture_path, "limit": 10},
@@ -100,6 +110,15 @@ def test_stdio_tools_and_resources() -> None:
                 assert not listed_passes.isError
                 assert listed_passes.structuredContent["result"]["returned_count"] > 0
                 first_pass_id = listed_passes.structuredContent["result"]["passes"][0]["pass_id"]
+
+                timed_passes = await session.call_tool(
+                    "renderdoc_list_passes",
+                    {"capture_path": capture_path, "limit": 10, "sort_by": "gpu_time"},
+                )
+                assert not timed_passes.isError
+                timed_passes_payload = timed_passes.structuredContent["result"]
+                assert timed_passes_payload["sort_by"] == "gpu_time"
+                assert timed_passes_payload["effective_sort_by"] in {"gpu_time", "event_order"}
 
                 pass_details = await session.call_tool(
                     "renderdoc_get_pass_details",
@@ -136,6 +155,14 @@ def test_stdio_tools_and_resources() -> None:
                 )
                 assert not pipeline.isError
                 assert pipeline.structuredContent["result"]["event_id"] == first_event
+
+                api_pipeline = await session.call_tool(
+                    "renderdoc_get_pipeline_state",
+                    {"capture_path": capture_path, "event_id": first_event, "detail_level": "api_specific"},
+                )
+                assert not api_pipeline.isError
+                assert api_pipeline.structuredContent["result"]["detail_level"] == "api_specific"
+                assert "api_pipeline" in api_pipeline.structuredContent["result"]
 
                 shader_probe_actions = await session.call_tool(
                     "renderdoc_list_actions",

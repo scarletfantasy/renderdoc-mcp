@@ -25,9 +25,11 @@ try:
         _serialize_buffer,
         _serialize_descriptor,
         _serialize_descriptor_access,
+        _serialize_d3d12_pipeline_state,
         _serialize_shader_stage,
         _serialize_texture,
         _serialize_vertex_input,
+        _serialize_vulkan_pipeline_state,
         _shader_stage_values,
     )
     from .transport import _WinSockClient, _log
@@ -46,9 +48,11 @@ except Exception:
         _serialize_buffer,
         _serialize_descriptor,
         _serialize_descriptor_access,
+        _serialize_d3d12_pipeline_state,
         _serialize_shader_stage,
         _serialize_texture,
         _serialize_vertex_input,
+        _serialize_vulkan_pipeline_state,
         _shader_stage_values,
     )
     from transport import _WinSockClient, _log
@@ -691,18 +695,27 @@ class BridgeClient(object):
             limit=limit,
         )
 
-    def _analyze_frame(self):
+    def _analyze_frame(self, include_timing_summary=False):
         analysis = self._ensure_frame_analysis()
-        return dict(analysis["analysis"])
+        timing_payload = self._ensure_timing_data() if include_timing_summary else None
+        return frame_analysis.build_analysis_result(
+            analysis,
+            include_timing_summary=bool(include_timing_summary),
+            timing_payload=timing_payload,
+        )
 
-    def _list_passes(self, cursor, limit, category_filter, name_filter):
+    def _list_passes(self, cursor, limit, category_filter, name_filter, sort_by, threshold_ms):
         analysis = self._ensure_frame_analysis()
+        timing_payload = self._ensure_timing_data() if sort_by == "gpu_time" else None
         return frame_analysis.list_passes(
             analysis,
             cursor=cursor,
             limit=limit,
             category_filter=category_filter,
             name_filter=name_filter,
+            sort_by=sort_by,
+            threshold_ms=threshold_ms,
+            timing_payload=timing_payload,
         )
 
     def _get_pass_details(self, pass_id):
@@ -756,10 +769,10 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return details
 
-    def _get_pipeline_state(self, event_id):
+    def _get_pipeline_state(self, event_id, detail_level):
         self._ensure_capture_loaded()
         action = self._set_event(event_id)
-        response = {"event_id": int(event_id)}
+        response = {"event_id": int(event_id), "detail_level": str(detail_level or "portable")}
 
         def callback(controller):
             state = controller.GetPipelineState()
@@ -787,6 +800,25 @@ class BridgeClient(object):
                 serialized = _serialize_shader_stage(self.ctx, state, stage)
                 if serialized is not None:
                     response["pipeline"]["shaders"].append(serialized)
+
+            if detail_level == "api_specific":
+                api_name = response["api"]
+                if api_name == "D3D12" and hasattr(controller, "GetD3D12PipelineState"):
+                    response["api_pipeline"] = _serialize_d3d12_pipeline_state(
+                        self.ctx,
+                        controller.GetD3D12PipelineState(),
+                    )
+                elif api_name == "Vulkan" and hasattr(controller, "GetVulkanPipelineState"):
+                    response["api_pipeline"] = _serialize_vulkan_pipeline_state(
+                        self.ctx,
+                        controller.GetVulkanPipelineState(),
+                    )
+                else:
+                    response["api_pipeline"] = {
+                        "api": api_name,
+                        "available": False,
+                        "reason": "No API-specific pipeline serializer is implemented for this capture API.",
+                    }
 
         self.ctx.Replay().BlockInvoke(callback)
         return response
@@ -1111,13 +1143,15 @@ class BridgeClient(object):
                 params.get("limit"),
             )
         if method == "analyze_frame":
-            return self._analyze_frame()
+            return self._analyze_frame(bool(params.get("include_timing_summary", False)))
         if method == "list_passes":
             return self._list_passes(
                 params.get("cursor"),
                 params.get("limit"),
                 params.get("category_filter"),
                 params.get("name_filter"),
+                params.get("sort_by", "event_order"),
+                params.get("threshold_ms"),
             )
         if method == "get_pass_details":
             return self._get_pass_details(params.get("pass_id", ""))
@@ -1128,7 +1162,10 @@ class BridgeClient(object):
         if method == "get_action_details":
             return self._get_action_details(int(params.get("event_id", 0)))
         if method == "get_pipeline_state":
-            return self._get_pipeline_state(int(params.get("event_id", 0)))
+            return self._get_pipeline_state(
+                int(params.get("event_id", 0)),
+                params.get("detail_level", "portable"),
+            )
         if method == "get_shader_code":
             return self._get_shader_code(
                 int(params.get("event_id", 0)),

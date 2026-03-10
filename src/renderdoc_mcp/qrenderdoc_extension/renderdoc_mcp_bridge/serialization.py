@@ -53,6 +53,20 @@ def _float_vector(value):
     ]
 
 
+def _safe_list(value):
+    try:
+        return list(value or [])
+    except Exception:
+        return []
+
+
+def _resource_ref(ctx, resource_id):
+    return {
+        "resource_id": _resource_id(resource_id),
+        "resource_name": _resource_name(ctx, resource_id),
+    }
+
+
 def _action_flags(action):
     if rd is None:
         return []
@@ -252,6 +266,22 @@ def _serialize_descriptor_access(value):
     }
 
 
+def _serialize_sampler_descriptor(value):
+    return {
+        "filter": _enum_name(getattr(value, "filter", "")),
+        "address_u": _enum_name(getattr(value, "addressU", "")),
+        "address_v": _enum_name(getattr(value, "addressV", "")),
+        "address_w": _enum_name(getattr(value, "addressW", "")),
+        "compare_function": _enum_name(getattr(value, "compareFunction", "")),
+        "max_anisotropy": int(getattr(value, "maxAnisotropy", 0)),
+        "mip_lod_bias": float(getattr(value, "mipLODBias", 0.0)),
+        "min_lod": float(getattr(value, "minLOD", 0.0)),
+        "max_lod": float(getattr(value, "maxLOD", 0.0)),
+        "border_color": _float_vector(getattr(value, "borderColor", None)),
+        "unnormalized": bool(getattr(value, "unnormalized", False)),
+    }
+
+
 def _serialize_used_descriptor(ctx, used):
     return {
         "access": _serialize_descriptor_access(used.access),
@@ -269,6 +299,207 @@ def _serialize_vertex_input(attribute):
         "format": _resource_format(attribute.format),
         "generic_enabled": bool(attribute.genericEnabled),
         "used": bool(attribute.used),
+    }
+
+
+def _descriptor_has_contents(descriptor):
+    return bool(
+        _resource_id(getattr(descriptor, "resource", None))
+        or _resource_id(getattr(descriptor, "secondary", None))
+        or _resource_id(getattr(descriptor, "view", None))
+        or int(getattr(descriptor, "byteSize", 0)) > 0
+    )
+
+
+def _serialize_d3d12_root_table_range(value):
+    return {
+        "category": _enum_name(getattr(value, "category", "")),
+        "space": int(getattr(value, "space", 0)),
+        "base_register": int(getattr(value, "baseRegister", 0)),
+        "count": int(getattr(value, "count", 0)),
+        "table_byte_offset": int(getattr(value, "tableByteOffset", 0)),
+        "appended": bool(getattr(value, "appended", False)),
+    }
+
+
+def _serialize_d3d12_root_param(ctx, index, value):
+    table_ranges = [_serialize_d3d12_root_table_range(item) for item in _safe_list(getattr(value, "tableRanges", []))]
+    descriptor = getattr(value, "descriptor", None)
+    constants = bytes(getattr(value, "constants", b"") or b"")
+    heap = getattr(value, "heap", None)
+    heap_resource_id = _resource_id(heap)
+
+    kind = "unknown"
+    if table_ranges or heap_resource_id:
+        kind = "descriptor_table"
+    elif len(constants) > 0:
+        kind = "constants"
+    elif descriptor is not None and _descriptor_has_contents(descriptor):
+        kind = "descriptor"
+
+    payload = {
+        "index": int(index),
+        "kind": kind,
+        "visibility": _enum_name(getattr(value, "visibility", "")),
+        "space": int(getattr(value, "space", 0)),
+        "register": int(getattr(value, "reg", 0)),
+        "constants_byte_count": len(constants),
+        "heap": _resource_ref(ctx, heap),
+        "heap_byte_offset": int(getattr(value, "heapByteOffset", 0)),
+        "table_range_count": len(table_ranges),
+        "table_ranges": table_ranges,
+    }
+    if descriptor is not None and _descriptor_has_contents(descriptor):
+        payload["descriptor"] = _serialize_descriptor(ctx, descriptor)
+    return payload
+
+
+def _serialize_d3d12_static_sampler(index, value):
+    return {
+        "index": int(index),
+        "visibility": _enum_name(getattr(value, "visibility", "")),
+        "space": int(getattr(value, "space", 0)),
+        "register": int(getattr(value, "reg", 0)),
+        "descriptor": _serialize_sampler_descriptor(getattr(value, "descriptor", None)),
+    }
+
+
+def _serialize_d3d12_root_signature(ctx, value):
+    parameters = [_serialize_d3d12_root_param(ctx, index, item) for index, item in enumerate(_safe_list(getattr(value, "parameters", [])))]
+    static_samplers = [
+        _serialize_d3d12_static_sampler(index, item)
+        for index, item in enumerate(_safe_list(getattr(value, "staticSamplers", [])))
+    ]
+    return {
+        "resource_id": _resource_id(getattr(value, "resourceId", None)),
+        "parameter_count": len(parameters),
+        "parameters": parameters,
+        "static_sampler_count": len(static_samplers),
+        "static_samplers": static_samplers,
+    }
+
+
+def _serialize_vk_dynamic_offset(value):
+    return {
+        "descriptor_byte_offset": int(getattr(value, "descriptorByteOffset", 0)),
+        "dynamic_buffer_byte_offset": int(getattr(value, "dynamicBufferByteOffset", 0)),
+    }
+
+
+def _serialize_vk_descriptor_set(value):
+    dynamic_offsets = [_serialize_vk_dynamic_offset(item) for item in _safe_list(getattr(value, "dynamicOffsets", []))]
+    return {
+        "layout_resource_id": _resource_id(getattr(value, "layoutResourceId", None)),
+        "descriptor_set_resource_id": _resource_id(getattr(value, "descriptorSetResourceId", None)),
+        "push_descriptor": bool(getattr(value, "pushDescriptor", False)),
+        "dynamic_offset_count": len(dynamic_offsets),
+        "dynamic_offsets": dynamic_offsets,
+        "descriptor_buffer_index": int(getattr(value, "descriptorBufferIndex", -1)),
+        "descriptor_buffer_byte_offset": int(getattr(value, "descriptorBufferByteOffset", 0)),
+        "descriptor_buffer_embedded_samplers": bool(getattr(value, "descriptorBufferEmbeddedSamplers", False)),
+    }
+
+
+def _serialize_vk_descriptor_buffer(ctx, value):
+    return {
+        "buffer": _resource_ref(ctx, getattr(value, "buffer", None)),
+        "offset": int(getattr(value, "offset", 0)),
+        "push_descriptor": bool(getattr(value, "pushDescriptor", False)),
+        "push_buffer": _resource_ref(ctx, getattr(value, "pushBuffer", None)),
+        "resource_buffer": bool(getattr(value, "resourceBuffer", False)),
+        "sampler_buffer": bool(getattr(value, "samplerBuffer", False)),
+    }
+
+
+def _serialize_vk_pipeline(ctx, value):
+    return {
+        "pipeline_resource_id": _resource_id(getattr(value, "pipelineResourceId", None)),
+        "pipeline_compute_layout_resource_id": _resource_id(getattr(value, "pipelineComputeLayoutResourceId", None)),
+        "pipeline_pre_rast_layout_resource_id": _resource_id(getattr(value, "pipelinePreRastLayoutResourceId", None)),
+        "pipeline_fragment_layout_resource_id": _resource_id(getattr(value, "pipelineFragmentLayoutResourceId", None)),
+        "flags": int(getattr(value, "flags", 0)),
+    }
+
+
+def _serialize_vk_renderpass(value):
+    return {
+        "resource_id": _resource_id(getattr(value, "resourceId", None)),
+        "dynamic": bool(getattr(value, "dynamic", False)),
+        "suspended": bool(getattr(value, "suspended", False)),
+        "feedback_loop": bool(getattr(value, "feedbackLoop", False)),
+        "subpass": int(getattr(value, "subpass", 0)),
+        "input_attachments": [int(item) for item in _safe_list(getattr(value, "inputAttachments", []))],
+        "color_attachments": [int(item) for item in _safe_list(getattr(value, "colorAttachments", []))],
+        "resolve_attachments": [int(item) for item in _safe_list(getattr(value, "resolveAttachments", []))],
+        "depthstencil_attachment": int(getattr(value, "depthstencilAttachment", -1)),
+        "depthstencil_resolve_attachment": int(getattr(value, "depthstencilResolveAttachment", -1)),
+        "fragment_density_attachment": int(getattr(value, "fragmentDensityAttachment", -1)),
+        "shading_rate_attachment": int(getattr(value, "shadingRateAttachment", -1)),
+        "multiviews": [int(item) for item in _safe_list(getattr(value, "multiviews", []))],
+        "tile_only_msaa_sample_count": int(getattr(value, "tileOnlyMSAASampleCount", 0)),
+        "color_attachment_locations": [int(item) for item in _safe_list(getattr(value, "colorAttachmentLocations", []))],
+        "color_attachment_input_indices": [int(item) for item in _safe_list(getattr(value, "colorAttachmentInputIndices", []))],
+        "is_depth_input_attachment_index_implicit": bool(getattr(value, "isDepthInputAttachmentIndexImplicit", True)),
+        "is_stencil_input_attachment_index_implicit": bool(getattr(value, "isStencilInputAttachmentIndexImplicit", True)),
+        "depth_input_attachment_index": int(getattr(value, "depthInputAttachmentIndex", 0)),
+        "stencil_input_attachment_index": int(getattr(value, "stencilInputAttachmentIndex", 0)),
+    }
+
+
+def _serialize_vk_framebuffer(ctx, value):
+    attachments = [_serialize_descriptor(ctx, item) for item in _safe_list(getattr(value, "attachments", []))]
+    return {
+        "resource_id": _resource_id(getattr(value, "resourceId", None)),
+        "attachment_count": len(attachments),
+        "attachments": attachments,
+        "width": int(getattr(value, "width", 0)),
+        "height": int(getattr(value, "height", 0)),
+        "layers": int(getattr(value, "layers", 0)),
+    }
+
+
+def _serialize_vk_render_area(value):
+    return {
+        "x": int(getattr(value, "x", 0)),
+        "y": int(getattr(value, "y", 0)),
+        "width": int(getattr(value, "width", 0)),
+        "height": int(getattr(value, "height", 0)),
+    }
+
+
+def _serialize_vk_current_pass(ctx, value):
+    return {
+        "renderpass": _serialize_vk_renderpass(getattr(value, "renderpass", None)),
+        "framebuffer": _serialize_vk_framebuffer(ctx, getattr(value, "framebuffer", None)),
+        "render_area": _serialize_vk_render_area(getattr(value, "renderArea", None)),
+        "color_feedback_allowed": bool(getattr(value, "colorFeedbackAllowed", False)),
+        "depth_feedback_allowed": bool(getattr(value, "depthFeedbackAllowed", False)),
+        "stencil_feedback_allowed": bool(getattr(value, "stencilFeedbackAllowed", False)),
+    }
+
+
+def _serialize_d3d12_pipeline_state(ctx, value):
+    return {
+        "api": "D3D12",
+        "available": True,
+        "pipeline_resource_id": _resource_id(getattr(value, "pipelineResourceId", None)),
+        "descriptor_heaps": [_resource_ref(ctx, item) for item in _safe_list(getattr(value, "descriptorHeaps", []))],
+        "root_signature": _serialize_d3d12_root_signature(ctx, getattr(value, "rootSignature", None)),
+    }
+
+
+def _serialize_vulkan_pipeline_state(ctx, value):
+    pipeline = getattr(value, "pipeline", None)
+    return {
+        "api": "Vulkan",
+        "available": True,
+        "pipeline": _serialize_vk_pipeline(ctx, pipeline),
+        "descriptor_sets": [_serialize_vk_descriptor_set(item) for item in _safe_list(getattr(pipeline, "descriptorSets", []))],
+        "descriptor_buffers": [
+            _serialize_vk_descriptor_buffer(ctx, item)
+            for item in _safe_list(getattr(pipeline, "descriptorBuffers", []))
+        ],
+        "current_pass": _serialize_vk_current_pass(ctx, getattr(value, "currentPass", None)),
     }
 
 

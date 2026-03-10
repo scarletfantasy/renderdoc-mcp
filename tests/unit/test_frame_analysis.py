@@ -257,6 +257,47 @@ def test_build_timing_result_reports_unavailable_timing() -> None:
     assert result["timing_unavailable_reason"] == "unsupported"
 
 
+def test_build_analysis_result_can_include_top_level_timing_summary() -> None:
+    nodes = [
+        _action(
+            100,
+            "BasePass",
+            ["push_marker"],
+            children=[
+                _action(101, "Depth", ["draw"], num_indices=100),
+                _action(102, "Color", ["draw"], num_indices=200),
+            ],
+        ),
+        _action(
+            200,
+            "Present",
+            ["push_marker"],
+            children=[_action(201, "Swap", ["draw"], outputs=[_resource("Backbuffer")])],
+        ),
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.build_analysis_result(
+        analysis,
+        include_timing_summary=True,
+        timing_payload={
+            "timing_available": True,
+            "counter_name": "EventGPUDuration",
+            "rows": [
+                {"event_id": 101, "gpu_time_ms": 0.25},
+                {"event_id": 102, "gpu_time_ms": 0.75},
+                {"event_id": 201, "gpu_time_ms": 0.5},
+            ],
+        },
+    )
+
+    assert result["timing_available"] is True
+    assert result["counter_name"] == "EventGPUDuration"
+    assert result["passes"][0]["gpu_time_ms"] == 1.0
+    assert result["passes"][0]["timed_event_count"] == 2
+    assert result["passes"][1]["gpu_time_ms"] == 0.5
+
+
 def test_build_performance_hotspots_prefers_real_gpu_timing() -> None:
     nodes = [
         _action(
@@ -295,6 +336,81 @@ def test_build_performance_hotspots_prefers_real_gpu_timing() -> None:
     assert result["top_passes"][0]["name"] == "BasePass"
     assert result["top_passes"][0]["gpu_time_ms"] == 1.75
     assert result["top_events"][0]["event_id"] == 102
+
+
+def test_list_passes_can_sort_by_gpu_time_and_apply_threshold() -> None:
+    nodes = [
+        _action(
+            100,
+            "BasePass",
+            ["push_marker"],
+            children=[
+                _action(101, "Depth", ["draw"], num_indices=120),
+                _action(102, "Color", ["draw"], num_indices=240),
+            ],
+        ),
+        _action(
+            200,
+            "Lighting",
+            ["push_marker"],
+            children=[_action(201, "Dispatch", ["dispatch"], dispatch_dimension=[8, 8, 1])],
+        ),
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.list_passes(
+        analysis,
+        sort_by="gpu_time",
+        threshold_ms=1.0,
+        timing_payload={
+            "timing_available": True,
+            "counter_name": "EventGPUDuration",
+            "rows": [
+                {"event_id": 101, "gpu_time_ms": 0.5},
+                {"event_id": 102, "gpu_time_ms": 1.25},
+                {"event_id": 201, "gpu_time_ms": 0.75},
+            ],
+        },
+    )
+
+    assert result["sort_by"] == "gpu_time"
+    assert result["effective_sort_by"] == "gpu_time"
+    assert result["timing_available"] is True
+    assert result["matched_count"] == 1
+    assert result["passes"][0]["name"] == "BasePass"
+    assert result["passes"][0]["gpu_time_ms"] == 1.75
+
+
+def test_list_passes_gpu_time_falls_back_when_unavailable() -> None:
+    nodes = [
+        _action(
+            100,
+            "BasePass",
+            ["push_marker"],
+            children=[_action(101, "Color", ["draw"], num_indices=240)],
+        ),
+        _action(
+            200,
+            "Compute",
+            ["push_marker"],
+            children=[_action(201, "Dispatch", ["dispatch"], dispatch_threads_dimension=[4, 4, 4])],
+        ),
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.list_passes(
+        analysis,
+        sort_by="gpu_time",
+        threshold_ms=0.5,
+        timing_payload={"timing_available": False, "counter_name": "EventGPUDuration", "rows": [], "reason": "unsupported"},
+    )
+
+    assert result["sort_by"] == "gpu_time"
+    assert result["effective_sort_by"] == "event_order"
+    assert result["timing_available"] is False
+    assert result["timing_unavailable_reason"] == "unsupported"
+    assert result["warnings"]
+    assert [item["name"] for item in result["passes"]] == ["BasePass", "Compute"]
 
 
 def test_build_performance_hotspots_falls_back_to_heuristics() -> None:

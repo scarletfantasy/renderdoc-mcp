@@ -28,8 +28,8 @@ class RenderDocService:
     def get_capture_summary(self, capture_path: str) -> dict[str, Any]:
         return self._captures.get_capture_summary(capture_path)
 
-    def analyze_frame(self, capture_path: str) -> dict[str, Any]:
-        return self._captures.analyze_frame(capture_path)
+    def analyze_frame(self, capture_path: str, include_timing_summary: Any = False) -> dict[str, Any]:
+        return self._captures.analyze_frame(capture_path, include_timing_summary=include_timing_summary)
 
     def list_actions(
         self,
@@ -54,6 +54,8 @@ class RenderDocService:
         limit: int | str | None = None,
         category_filter: str | None = None,
         name_filter: str | None = None,
+        sort_by: str | None = None,
+        threshold_ms: float | str | None = None,
     ) -> dict[str, Any]:
         return self._passes.list_passes(
             capture_path,
@@ -61,6 +63,8 @@ class RenderDocService:
             limit=limit,
             category_filter=category_filter,
             name_filter=name_filter,
+            sort_by=sort_by,
+            threshold_ms=threshold_ms,
         )
 
     def get_pass_details(self, capture_path: str, pass_id: str) -> dict[str, Any]:
@@ -75,8 +79,8 @@ class RenderDocService:
     def get_action_details(self, capture_path: str, event_id: int) -> dict[str, Any]:
         return self._actions.get_action_details(capture_path, event_id)
 
-    def get_pipeline_state(self, capture_path: str, event_id: int) -> dict[str, Any]:
-        return self._actions.get_pipeline_state(capture_path, event_id)
+    def get_pipeline_state(self, capture_path: str, event_id: int, detail_level: str | None = None) -> dict[str, Any]:
+        return self._actions.get_pipeline_state(capture_path, event_id, detail_level=detail_level)
 
     def get_shader_code(
         self,

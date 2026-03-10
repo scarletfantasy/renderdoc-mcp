@@ -3,6 +3,7 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+from renderdoc_mcp.errors import RenderDocMCPError
 from renderdoc_mcp.services.common import ServiceContext
 from renderdoc_mcp.uri import decode_capture_path, encode_capture_path
 
@@ -18,11 +19,22 @@ class CaptureQueries:
             lambda normalized: self.context.capture_tool(normalized, "get_capture_summary"),
         )
 
-    def analyze_frame(self, capture_path: str) -> dict[str, Any]:
+    def analyze_frame(self, capture_path: str, include_timing_summary: Any = False) -> dict[str, Any]:
+        try:
+            include_timing_summary = bool(
+                self.context.normalize_optional_bool(include_timing_summary, "include_timing_summary") or False
+            )
+        except RenderDocMCPError as exc:
+            return self.context.error_response(capture_path, exc, "Analyzed the frame pass structure from RenderDoc.")
+
+        params: dict[str, Any] = {}
+        if include_timing_summary:
+            params["include_timing_summary"] = True
+
         return self.context.run_tool(
             capture_path,
             "Analyzed the frame pass structure from RenderDoc.",
-            lambda normalized: self.context.capture_tool(normalized, "analyze_frame"),
+            lambda normalized: self.context.capture_tool(normalized, "analyze_frame", params),
         )
 
     def recent_captures_resource(self) -> dict[str, Any]:

@@ -32,6 +32,7 @@ SUPPORTED_SHADER_STAGES = {
     "miss": "Miss",
     "callable": "Callable",
 }
+SUPPORTED_PIPELINE_DETAIL_LEVELS = {"portable", "api_specific"}
 
 
 def _normalize_shader_stage(stage: str | None) -> str | None:
@@ -114,16 +115,36 @@ class ActionQueries:
             lambda normalized: self.context.capture_tool(normalized, "get_action_details", {"event_id": event_id}),
         )
 
-    def get_pipeline_state(self, capture_path: str, event_id: int) -> dict[str, Any]:
+    def get_pipeline_state(
+        self,
+        capture_path: str,
+        event_id: int,
+        detail_level: str | None = None,
+    ) -> dict[str, Any]:
         try:
             event_id = self.context.normalize_required_int(event_id, "event_id")
+            detail_level = (self.context.normalize_optional_string(detail_level) or "portable").lower()
         except RenderDocMCPError as exc:
             return self.context.error_response(capture_path, exc, "Fetched pipeline state for the selected event.")
+
+        if detail_level not in SUPPORTED_PIPELINE_DETAIL_LEVELS:
+            return self.context.error_response(
+                capture_path,
+                ReplayFailureError(
+                    "detail_level must be one of {}.".format(", ".join(sorted(SUPPORTED_PIPELINE_DETAIL_LEVELS))),
+                    {"detail_level": detail_level},
+                ),
+                "Fetched pipeline state for the selected event.",
+            )
 
         return self.context.run_tool(
             capture_path,
             "Fetched pipeline state for the selected event.",
-            lambda normalized: self.context.capture_tool(normalized, "get_pipeline_state", {"event_id": event_id}),
+            lambda normalized: self.context.capture_tool(
+                normalized,
+                "get_pipeline_state",
+                {"event_id": event_id, "detail_level": detail_level},
+            ),
         )
 
     def get_shader_code(

@@ -102,6 +102,29 @@ def test_analyze_frame_uses_bridge(tmp_path: Path) -> None:
     assert bridge.calls == [("analyze_frame", {})]
 
 
+def test_analyze_frame_accepts_timing_summary_flag(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.analyze_frame(str(capture_path), include_timing_summary=True)
+
+    assert response["error"] is None
+    assert bridge.calls == [("analyze_frame", {"include_timing_summary": True})]
+
+
+def test_analyze_frame_rejects_invalid_timing_summary_flag(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.analyze_frame(str(capture_path), include_timing_summary="bogus")
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
 def test_list_passes_validates_category_filter(tmp_path: Path) -> None:
     capture_path = tmp_path / "sample.rdc"
     capture_path.write_text("x", encoding="utf-8")
@@ -125,6 +148,33 @@ def test_list_passes_uses_default_limit(tmp_path: Path) -> None:
     assert bridge.calls == [("list_passes", {"limit": 100, "cursor": 5, "category_filter": "geometry"})]
 
 
+def test_list_passes_accepts_sort_by_and_threshold(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.list_passes(
+        str(capture_path),
+        sort_by="gpu_time",
+        threshold_ms="0.5",
+    )
+
+    assert response["error"] is None
+    assert bridge.calls == [("list_passes", {"limit": 100, "sort_by": "gpu_time", "threshold_ms": 0.5})]
+
+
+def test_list_passes_rejects_invalid_sort_by(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.list_passes(str(capture_path), sort_by="bogus")
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
 def test_get_pass_details_requires_non_empty_pass_id(tmp_path: Path) -> None:
     capture_path = tmp_path / "sample.rdc"
     capture_path.write_text("x", encoding="utf-8")
@@ -142,6 +192,29 @@ def test_invalid_event_id_string_returns_structured_error(tmp_path: Path) -> Non
 
     service = RenderDocService(bridge=DummyBridge())
     response = service.get_action_details(str(capture_path), event_id="not-an-int")
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
+def test_get_pipeline_state_accepts_api_specific_detail_level(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_pipeline_state(str(capture_path), event_id="42", detail_level=" api_specific ")
+
+    assert response["error"] is None
+    assert bridge.calls == [("get_pipeline_state", {"event_id": 42, "detail_level": "api_specific"})]
+
+
+def test_get_pipeline_state_rejects_invalid_detail_level(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.get_pipeline_state(str(capture_path), event_id=42, detail_level="verbose")
 
     assert response["result"] is None
     assert response["error"]["code"] == "replay_failure"

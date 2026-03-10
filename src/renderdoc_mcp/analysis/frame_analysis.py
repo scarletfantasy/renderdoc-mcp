@@ -12,6 +12,13 @@ PASS_CATEGORIES = (
     "compute",
     "unknown",
 )
+PASS_SORT_OPTIONS = (
+    "event_order",
+    "gpu_time",
+    "draw_calls",
+    "dispatches",
+    "name",
+)
 
 LEGACY_ACTION_LIST_NODE_LIMIT = 500
 DEFAULT_ACTION_PAGE_LIMIT = 100
@@ -179,24 +186,105 @@ def build_frame_analysis(nodes, metadata):
     }
 
 
-def list_passes(analysis_cache, cursor=None, limit=None, category_filter=None, name_filter=None):
+def build_analysis_result(analysis_cache, include_timing_summary=False, timing_payload=None):
+    result = {
+        "capture": dict(analysis_cache["capture"]),
+        "api": analysis_cache["api"],
+        "frame": dict(analysis_cache["frame"]),
+        "statistics": dict(analysis_cache["statistics"]),
+        "resource_counts": dict(analysis_cache["resource_counts"]),
+        "pass_count": len(analysis_cache["passes"]),
+        "passes": [_pass_summary(item) for item in analysis_cache["passes"]],
+        "top_draw_passes": [_copy_pass_entry(item) for item in analysis_cache["analysis"]["top_draw_passes"]],
+        "top_compute_passes": [_copy_pass_entry(item) for item in analysis_cache["analysis"]["top_compute_passes"]],
+        "tail_chain": [_copy_pass_entry(item) for item in analysis_cache["analysis"]["tail_chain"]],
+        "warnings": list(analysis_cache["analysis"]["warnings"]),
+    }
+
+    if include_timing_summary:
+        normalized_timing = _normalize_timing_payload(timing_payload)
+        result.update(_timing_metadata(normalized_timing))
+        result["passes"] = _timed_pass_summaries(analysis_cache["passes"], normalized_timing)
+
+    return result
+
+
+def list_passes(
+    analysis_cache,
+    cursor=None,
+    limit=None,
+    category_filter=None,
+    name_filter=None,
+    sort_by="event_order",
+    threshold_ms=None,
+    timing_payload=None,
+):
     passes = analysis_cache["passes"]
     name_filter_lower = _lower(name_filter)
-    filtered = []
+    filtered_passes = []
 
     for pass_payload in passes:
         if category_filter and pass_payload["category"] != category_filter:
             continue
         if name_filter_lower and name_filter_lower not in pass_payload["name"].lower():
             continue
-        filtered.append(_pass_summary(pass_payload))
+        filtered_passes.append(pass_payload)
+
+    warnings = []
+    effective_sort_by = sort_by
+    filtered = []
+    timing_fields = {}
+
+    if sort_by == "gpu_time":
+        normalized_timing = _normalize_timing_payload(timing_payload)
+        timing_fields = _timing_metadata(normalized_timing)
+        filtered = _timed_pass_summaries(filtered_passes, normalized_timing)
+        if timing_fields["timing_available"]:
+            if threshold_ms is not None:
+                filtered = [item for item in filtered if item["gpu_time_ms"] >= float(threshold_ms)]
+            filtered = sorted(
+                filtered,
+                key=lambda item: (-item["gpu_time_ms"], item["event_range"]["start_event_id"]),
+            )
+        else:
+            effective_sort_by = "event_order"
+            warnings.append(
+                "GPU timing is unavailable, so sort_by='gpu_time' fell back to event_order."
+            )
+            if threshold_ms is not None:
+                warnings.append("threshold_ms was ignored because GPU timing is unavailable.")
+    else:
+        filtered = [_pass_summary(pass_payload) for pass_payload in filtered_passes]
+        if sort_by == "draw_calls":
+            filtered = sorted(
+                filtered,
+                key=lambda item: (
+                    -item["stats"]["draw_calls"],
+                    -item["stats"]["total_actions"],
+                    item["event_range"]["start_event_id"],
+                ),
+            )
+        elif sort_by == "dispatches":
+            filtered = sorted(
+                filtered,
+                key=lambda item: (
+                    -item["stats"]["dispatches"],
+                    -item["stats"]["total_actions"],
+                    item["event_range"]["start_event_id"],
+                ),
+            )
+        elif sort_by == "name":
+            filtered = sorted(
+                filtered,
+                key=lambda item: (item["name"].lower(), item["event_range"]["start_event_id"]),
+            )
 
     page_limit = int(limit if limit is not None else DEFAULT_PASS_PAGE_LIMIT)
     offset = int(cursor or 0)
     page = filtered[offset : offset + page_limit]
     next_offset = offset + len(page)
     has_more = next_offset < len(filtered)
-    return {
+    result = {
         "passes": page,
         "count": len(passes),
         "matched_count": len(filtered),
@@ -207,7 +295,14 @@ def list_passes(analysis_cache, cursor=None, limit=None, category_filter=None, n
         "next_cursor": str(next_offset) if has_more else "",
         "category_filter": category_filter or "",
         "name_filter": name_filter or "",
+        "sort_by": sort_by or "event_order",
+        "effective_sort_by": effective_sort_by,
+        "threshold_ms": float(threshold_ms) if sort_by == "gpu_time" and threshold_ms is not None else None,
+        "warnings": warnings,
     }
+    if sort_by == "gpu_time":
+        result.update(timing_fields)
+    return result
 
 
 def get_pass_details(analysis_cache, pass_id):
@@ -219,6 +314,7 @@ def build_timing_result(analysis_cache, pass_id, timing_payload):
     if pass_payload is None:
         return None
 
+    timing_payload = _normalize_timing_payload(timing_payload)
     available = bool(timing_payload.get("timing_available"))
     counter_name = timing_payload.get("counter_name", "EventGPUDuration")
     result = {
@@ -264,6 +360,7 @@ def build_performance_hotspots(analysis_cache, timing_payload, limit=HOTSPOT_LIM
     limit = int(limit or HOTSPOT_LIMIT)
     action_index = {}
     _index_action_nodes(analysis_cache["action_tree"], action_index)
+    timing_payload = _normalize_timing_payload(timing_payload)
 
     available = bool(timing_payload.get("timing_available"))
     result = {
@@ -618,6 +715,33 @@ def _pass_summary(pass_payload):
     }
 
 
+def _copy_pass_entry(item):
+    payload = {
+        "pass_id": item["pass_id"],
+        "name": item["name"],
+        "category": item["category"],
+        "confidence": item["confidence"],
+        "reasons": list(item.get("reasons", [])),
+        "level": int(item["level"]),
+        "event_range": dict(item["event_range"]),
+        "stats": dict(item["stats"]),
+        "output_summary": {
+            "has_color_output": bool(item["output_summary"]["has_color_output"]),
+            "has_depth_output": bool(item["output_summary"]["has_depth_output"]),
+            "color_target_count_max": int(item["output_summary"]["color_target_count_max"]),
+            "color_targets": list(item["output_summary"]["color_targets"]),
+            "depth_targets": list(item["output_summary"]["depth_targets"]),
+        },
+        "representative_events": [_representative_event_copy(event) for event in item["representative_events"]],
+        "child_pass_count": int(item["child_pass_count"]),
+    }
+    if "gpu_time_ms" in item:
+        payload["gpu_time_ms"] = item["gpu_time_ms"]
+    if "timed_event_count" in item:
+        payload["timed_event_count"] = int(item["timed_event_count"])
+    return payload
+
+
 def _build_tail_chain(passes):
     if not passes:
         return []
@@ -662,6 +786,14 @@ def _representative_event(node):
         "event_id": int(node["event_id"]),
         "name": node["name"],
         "flags": list(node.get("flags", [])),
+    }
+
+
+def _representative_event_copy(item):
+    return {
+        "event_id": int(item["event_id"]),
+        "name": item["name"],
+        "flags": list(item.get("flags", [])),
     }
 
 
@@ -753,6 +885,54 @@ def _timed_event_entry(item, node):
         "metric_value": round(float(item["gpu_time_ms"]), 6),
         "gpu_time_ms": round(float(item["gpu_time_ms"]), 6),
     }
+    return payload
+
+
+def _normalize_timing_payload(timing_payload):
+    payload = dict(timing_payload or {})
+    payload.setdefault("timing_available", False)
+    payload.setdefault("counter_name", "EventGPUDuration")
+    payload.setdefault("rows", [])
+    return payload
+
+
+def _timing_metadata(timing_payload):
+    payload = {
+        "timing_available": bool(timing_payload.get("timing_available")),
+        "counter_name": timing_payload.get("counter_name", "EventGPUDuration"),
+    }
+    if not payload["timing_available"]:
+        payload["timing_unavailable_reason"] = timing_payload.get(
+            "reason",
+            "GPU duration counters are unavailable for this capture or replay device.",
+        )
+    return payload
+
+
+def _timed_pass_summaries(pass_payloads, timing_payload):
+    rows = list(timing_payload.get("rows", []))
+    available = bool(timing_payload.get("timing_available"))
+    payload = []
+
+    for pass_payload in pass_payloads:
+        summary = _pass_summary(pass_payload)
+        if not available:
+            summary["gpu_time_ms"] = None
+            summary["timed_event_count"] = 0
+            payload.append(summary)
+            continue
+
+        start_event_id = int(pass_payload["event_range"]["start_event_id"])
+        end_event_id = int(pass_payload["event_range"]["end_event_id"])
+        matched_rows = [
+            item
+            for item in rows
+            if start_event_id <= int(item["event_id"]) <= end_event_id
+        ]
+        summary["gpu_time_ms"] = round(sum(float(item["gpu_time_ms"]) for item in matched_rows), 6)
+        summary["timed_event_count"] = len(matched_rows)
+        payload.append(summary)
+
     return payload
 
 

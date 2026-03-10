@@ -2,11 +2,17 @@ from __future__ import annotations
 
 from typing import Any
 
-from renderdoc_mcp.analysis.frame_analysis import DEFAULT_PASS_PAGE_LIMIT, MAX_PAGE_LIMIT, PASS_CATEGORIES
+from renderdoc_mcp.analysis.frame_analysis import (
+    DEFAULT_PASS_PAGE_LIMIT,
+    MAX_PAGE_LIMIT,
+    PASS_CATEGORIES,
+    PASS_SORT_OPTIONS,
+)
 from renderdoc_mcp.errors import ReplayFailureError, RenderDocMCPError
 from renderdoc_mcp.services.common import ServiceContext
 
 SUPPORTED_PASS_CATEGORIES = set(PASS_CATEGORIES)
+SUPPORTED_PASS_SORT_OPTIONS = set(PASS_SORT_OPTIONS)
 
 
 class PassQueries:
@@ -20,12 +26,16 @@ class PassQueries:
         limit: int | str | None = None,
         category_filter: str | None = None,
         name_filter: str | None = None,
+        sort_by: str | None = None,
+        threshold_ms: float | str | None = None,
     ) -> dict[str, Any]:
         try:
             cursor = self.context.normalize_optional_int(cursor, "cursor")
             limit = self.context.normalize_optional_int(limit, "limit")
             category_filter = self.context.normalize_optional_string(category_filter)
             name_filter = self.context.normalize_optional_string(name_filter)
+            sort_by = (self.context.normalize_optional_string(sort_by) or "event_order").lower()
+            threshold_ms = self.context.normalize_optional_float(threshold_ms, "threshold_ms")
         except RenderDocMCPError as exc:
             return self.context.error_response(capture_path, exc, "Pass listing failed.")
 
@@ -56,6 +66,26 @@ class PassQueries:
                 "Pass listing failed.",
             )
 
+        if sort_by not in SUPPORTED_PASS_SORT_OPTIONS:
+            return self.context.error_response(
+                capture_path,
+                ReplayFailureError(
+                    "sort_by must be one of {}.".format(", ".join(sorted(SUPPORTED_PASS_SORT_OPTIONS))),
+                    {"sort_by": sort_by},
+                ),
+                "Pass listing failed.",
+            )
+
+        if threshold_ms is not None and threshold_ms < 0:
+            return self.context.error_response(
+                capture_path,
+                ReplayFailureError(
+                    "threshold_ms must be greater than or equal to 0.",
+                    {"threshold_ms": threshold_ms},
+                ),
+                "Pass listing failed.",
+            )
+
         params: dict[str, Any] = {"limit": limit or DEFAULT_PASS_PAGE_LIMIT}
         if cursor is not None:
             params["cursor"] = cursor
@@ -63,6 +93,10 @@ class PassQueries:
             params["category_filter"] = category_filter
         if name_filter:
             params["name_filter"] = name_filter
+        if sort_by != "event_order":
+            params["sort_by"] = sort_by
+        if threshold_ms is not None:
+            params["threshold_ms"] = threshold_ms
 
         return self.context.run_tool(
             capture_path,

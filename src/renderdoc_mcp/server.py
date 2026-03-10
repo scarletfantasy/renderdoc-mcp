@@ -35,11 +35,11 @@ def renderdoc_get_capture_summary(capture_path: str) -> dict[str, Any]:
 
 @app.tool(
     name="renderdoc_analyze_frame",
-    description="Analyze a RenderDoc capture into top-level passes, hotspots, and a tail UI/present chain.",
+    description="Analyze a RenderDoc capture into top-level passes, hotspots, and a tail UI/present chain, with optional top-level pass GPU timing summary.",
     structured_output=True,
 )
-def renderdoc_analyze_frame(capture_path: str) -> dict[str, Any]:
-    return get_service().analyze_frame(capture_path)
+def renderdoc_analyze_frame(capture_path: str, include_timing_summary: bool = False) -> dict[str, Any]:
+    return get_service().analyze_frame(capture_path, include_timing_summary=include_timing_summary)
 
 
 @app.tool(
@@ -65,7 +65,7 @@ def renderdoc_list_actions(
 
 @app.tool(
     name="renderdoc_list_passes",
-    description="List analyzed top-level frame passes with pagination and optional category or name filters.",
+    description="List analyzed top-level frame passes with pagination, optional filtering, and optional sorting including GPU time when available.",
     structured_output=True,
 )
 def renderdoc_list_passes(
@@ -74,6 +74,8 @@ def renderdoc_list_passes(
     limit: int | None = None,
     category_filter: str | None = None,
     name_filter: str | None = None,
+    sort_by: str = "event_order",
+    threshold_ms: float | None = None,
 ) -> dict[str, Any]:
     return get_service().list_passes(
         capture_path,
@@ -81,6 +83,8 @@ def renderdoc_list_passes(
         limit=limit,
         category_filter=category_filter,
         name_filter=name_filter,
+        sort_by=sort_by,
+        threshold_ms=threshold_ms,
     )
 
 
@@ -122,11 +126,15 @@ def renderdoc_get_action_details(capture_path: str, event_id: int) -> dict[str, 
 
 @app.tool(
     name="renderdoc_get_pipeline_state",
-    description="Fetch the API-agnostic pipeline state at a specific RenderDoc event_id.",
+    description="Fetch the API-agnostic pipeline state at a specific RenderDoc event_id, with optional API-specific detail.",
     structured_output=True,
 )
-def renderdoc_get_pipeline_state(capture_path: str, event_id: int) -> dict[str, Any]:
-    return get_service().get_pipeline_state(capture_path, event_id)
+def renderdoc_get_pipeline_state(
+    capture_path: str,
+    event_id: int,
+    detail_level: str = "portable",
+) -> dict[str, Any]:
+    return get_service().get_pipeline_state(capture_path, event_id, detail_level=detail_level)
 
 
 @app.tool(

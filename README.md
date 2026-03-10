@@ -50,6 +50,15 @@ The result includes:
 - draw-heavy and compute-heavy pass rankings
 - the tail chain leading into UI and presentation
 
+To include a top-level pass timing summary when GPU duration counters are available:
+
+```powershell
+renderdoc_analyze_frame(
+  capture_path="C:\\captures\\frame.rdc",
+  include_timing_summary=true
+)
+```
+
 To drill into a specific pass:
 
 1. Call `renderdoc_list_passes(capture_path=..., limit=100)`.
@@ -72,6 +81,19 @@ renderdoc_get_performance_hotspots(capture_path="C:\\captures\\frame.rdc")
 
 If the replay device exposes `GPUCounter.EventGPUDuration`, hotspots are ranked by real GPU time. Otherwise the tool falls back to draw, dispatch, copy, and clear heuristics.
 
+For quick pass triage, `renderdoc_list_passes` can sort by GPU time or simple structural metrics:
+
+```powershell
+renderdoc_list_passes(
+  capture_path="C:\\captures\\frame.rdc",
+  sort_by="gpu_time",
+  threshold_ms=0.5,
+  limit=20
+)
+```
+
+If GPU timing is unavailable, `sort_by="gpu_time"` falls back to event order and reports that in the result.
+
 ## Low-level action access
 
 `renderdoc_list_actions` keeps the legacy tree preview by default. When no `cursor` or `limit` is supplied, it returns a tree preview capped at `500` visible nodes and includes `has_more` and `next_cursor`.
@@ -91,6 +113,18 @@ renderdoc_get_shader_code(capture_path="C:\\captures\\frame.rdc", event_id=1234,
 ```
 
 The result includes the selected shader stage metadata, available disassembly targets reported by RenderDoc, and the disassembly text for the chosen target.
+
+To fetch API-specific pipeline details in addition to the portable pipeline abstraction:
+
+```powershell
+renderdoc_get_pipeline_state(
+  capture_path="C:\\captures\\frame.rdc",
+  event_id=1234,
+  detail_level="api_specific"
+)
+```
+
+On D3D12 this adds descriptor heap and root signature details. On Vulkan it adds pipeline, descriptor set or buffer, and current render pass information.
 
 ## Resource inspection
 
