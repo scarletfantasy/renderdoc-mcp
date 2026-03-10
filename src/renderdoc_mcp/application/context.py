@@ -52,7 +52,13 @@ class ApplicationContext:
         path = ui_config_path()
         if not path.exists():
             return {}
-        return json.loads(path.read_text(encoding="utf-8"))
+        try:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeError, json.JSONDecodeError):
+            return {}
+        if not isinstance(payload, dict):
+            return {}
+        return payload
 
     def normalize_capture_path(self, capture_path: str) -> str:
         path = Path(capture_path).expanduser()

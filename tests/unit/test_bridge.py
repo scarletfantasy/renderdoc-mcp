@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
+from renderdoc_mcp import bridge as bridge_module
+from renderdoc_mcp.errors import BridgeHandshakeTimeoutError
 from renderdoc_mcp.bridge import QRenderDocBridge
 from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge import client as bridge_client_module
 from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge.client import BridgeClient
@@ -114,6 +119,70 @@ def test_qrenderdoc_bridge_records_renderdoc_version_from_hello() -> None:
     bridge._accept_hello({"type": "hello", "token": "token", "renderdoc_version": "1.43"}, "token")
 
     assert bridge.renderdoc_version == "1.43"
+
+
+def test_qrenderdoc_bridge_timeout_does_not_shell_out_to_kill_external_processes(monkeypatch) -> None:
+    class FakeProcess:
+        def __init__(self) -> None:
+            self._terminated = False
+
+        def poll(self):
+            return 0 if self._terminated else None
+
+        def terminate(self) -> None:
+            self._terminated = True
+
+        def wait(self, timeout=None) -> int:
+            return 0
+
+        def kill(self) -> None:
+            self._terminated = True
+
+    class FakeListenSocket:
+        def setsockopt(self, *args) -> None:
+            return None
+
+        def bind(self, address) -> None:
+            return None
+
+        def listen(self, backlog) -> None:
+            return None
+
+        def settimeout(self, value) -> None:
+            return None
+
+        def getsockname(self):
+            return ("127.0.0.1", 43210)
+
+        def accept(self):
+            raise TimeoutError()
+
+        def close(self) -> None:
+            return None
+
+    monotonic_values = iter([0.0, 0.0, 1.0, 1.0, 1.0, 2.0])
+    spawned: list[FakeProcess] = []
+    subprocess_run_calls: list[list[str]] = []
+
+    monkeypatch.setattr(bridge_module, "resolve_qrenderdoc_path", lambda: Path(r"C:\RenderDoc\qrenderdoc.exe"))
+    monkeypatch.setattr(bridge_module.socket, "socket", lambda *args, **kwargs: FakeListenSocket())
+    monkeypatch.setattr(bridge_module.subprocess, "Popen", lambda *args, **kwargs: spawned.append(FakeProcess()) or spawned[-1])
+    monkeypatch.setattr(
+        bridge_module.subprocess,
+        "run",
+        lambda args, **kwargs: subprocess_run_calls.append(list(args)) or SimpleNamespace(returncode=0, stdout="", stderr=""),
+    )
+    monkeypatch.setattr(bridge_module.time, "monotonic", lambda: next(monotonic_values))
+    monkeypatch.setattr(bridge_module.time, "sleep", lambda seconds: None)
+
+    bridge = QRenderDocBridge(timeout_seconds=1.0)
+
+    with pytest.raises(BridgeHandshakeTimeoutError):
+        bridge.ensure_started()
+
+    assert len(spawned) == 2
+    assert all(process.poll() is not None for process in spawned)
+    assert subprocess_run_calls == []
 
 
 def test_bridge_client_pipeline_overview_gracefully_handles_missing_descriptor_access() -> None:

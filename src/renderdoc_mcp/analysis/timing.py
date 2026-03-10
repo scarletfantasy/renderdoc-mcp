@@ -1,3 +1,5 @@
+from bisect import bisect_left, bisect_right
+
 try:
     from .models import (
         DEFAULT_PASS_PAGE_LIMIT,
@@ -200,15 +202,13 @@ def list_timing_events(
     start_event_id = int(pass_payload["event_range"]["start_event_id"])
     end_event_id = int(pass_payload["event_range"]["end_event_id"])
     events = []
-    total_gpu_time_ms = 0.0
 
-    for item in normalized_timing.get("rows", []):
-        event_id = int(item["event_id"])
-        if event_id < start_event_id or event_id > end_event_id:
-            continue
+    timing_index = _timing_index(normalized_timing)
+    total_gpu_time_ms, _ = _timing_range_summary(timing_index, start_event_id, end_event_id)
+    for item in _timing_rows_in_range(timing_index, start_event_id, end_event_id):
+        event_id = item["event_id"]
         event_entry = timed_event_entry(item, action_index.get(event_id))
         events.append(event_entry)
-        total_gpu_time_ms += event_entry["gpu_time_ms"]
 
     if sort_by == "gpu_time":
         events = sorted(events, key=lambda item: (-item["gpu_time_ms"], item["event_id"]))
@@ -262,20 +262,20 @@ def build_timing_result(
     if not timing_info.timing_available:
         return with_meta(result, timing=timing_info)
 
-    action_index = {}
-    index_action_nodes(analysis_cache["action_tree"], action_index)
+    action_index = analysis_cache.get("action_index")
+    if action_index is None:
+        action_index = {}
+        index_action_nodes(analysis_cache["action_tree"], action_index)
     start_event_id = int(pass_payload["event_range"]["start_event_id"])
     end_event_id = int(pass_payload["event_range"]["end_event_id"])
     events = []
-    total_gpu_time_ms = 0.0
 
-    for item in normalized_timing.get("rows", []):
-        event_id = int(item["event_id"])
-        if event_id < start_event_id or event_id > end_event_id:
-            continue
+    timing_index = _timing_index(normalized_timing)
+    total_gpu_time_ms, _ = _timing_range_summary(timing_index, start_event_id, end_event_id)
+    for item in _timing_rows_in_range(timing_index, start_event_id, end_event_id):
+        event_id = item["event_id"]
         event_entry = timed_event_entry(item, action_index.get(event_id))
         events.append(event_entry)
-        total_gpu_time_ms += event_entry["gpu_time_ms"]
 
     events = sorted(events, key=lambda item: (item["event_id"], item["name"]))
     result["events"] = events
@@ -285,10 +285,12 @@ def build_timing_result(
 
 
 def normalize_timing_payload(timing_payload=None):
-    payload = dict(timing_payload or {})
+    payload = timing_payload if isinstance(timing_payload, dict) else dict(timing_payload or {})
     payload.setdefault("timing_available", False)
     payload.setdefault("counter_name", "EventGPUDuration")
     payload.setdefault("rows", [])
+    if payload.get("timing_available"):
+        _timing_index(payload)
     return payload
 
 
@@ -307,9 +309,9 @@ def timing_info_from_payload(timing_payload=None):
 
 
 def timed_pass_summaries(pass_payloads, timing_payload):
-    rows = list(timing_payload.get("rows", []))
     available = bool(timing_payload.get("timing_available"))
     payload = []
+    timing_index = _timing_index(timing_payload) if available else None
 
     for pass_payload in pass_payloads:
         summary = pass_list_entry(pass_payload)
@@ -321,13 +323,9 @@ def timed_pass_summaries(pass_payloads, timing_payload):
 
         start_event_id = int(pass_payload["event_range"]["start_event_id"])
         end_event_id = int(pass_payload["event_range"]["end_event_id"])
-        matched_rows = [
-            item
-            for item in rows
-            if start_event_id <= int(item["event_id"]) <= end_event_id
-        ]
-        summary["gpu_time_ms"] = round(sum(float(item["gpu_time_ms"]) for item in matched_rows), 6)
-        summary["timed_event_count"] = len(matched_rows)
+        total_gpu_time_ms, timed_event_count = _timing_range_summary(timing_index, start_event_id, end_event_id)
+        summary["gpu_time_ms"] = total_gpu_time_ms
+        summary["timed_event_count"] = timed_event_count
         payload.append(summary)
 
     return payload
@@ -350,3 +348,56 @@ def lower(value):
     if value is None:
         return None
     return str(value).strip().lower()
+
+
+def _timing_index(timing_payload):
+    cached = timing_payload.get("_timing_index")
+    if cached is not None:
+        return cached
+
+    rows = sorted(
+        (
+            {
+                "event_id": int(item["event_id"]),
+                "gpu_time_ms": round(float(item["gpu_time_ms"]), 6),
+            }
+            for item in timing_payload.get("rows", [])
+        ),
+        key=lambda item: item["event_id"],
+    )
+    event_ids = [item["event_id"] for item in rows]
+    prefix_gpu_ms = [0.0]
+    prefix_counts = [0]
+
+    for item in rows:
+        prefix_gpu_ms.append(prefix_gpu_ms[-1] + item["gpu_time_ms"])
+        prefix_counts.append(prefix_counts[-1] + 1)
+
+    cached = {
+        "rows": rows,
+        "event_ids": event_ids,
+        "prefix_gpu_ms": prefix_gpu_ms,
+        "prefix_counts": prefix_counts,
+    }
+    timing_payload["rows"] = rows
+    timing_payload["_timing_index"] = cached
+    return cached
+
+
+def _timing_range_bounds(timing_index, start_event_id, end_event_id):
+    event_ids = timing_index["event_ids"]
+    start_offset = bisect_left(event_ids, int(start_event_id))
+    end_offset = bisect_right(event_ids, int(end_event_id))
+    return start_offset, end_offset
+
+
+def _timing_rows_in_range(timing_index, start_event_id, end_event_id):
+    start_offset, end_offset = _timing_range_bounds(timing_index, start_event_id, end_event_id)
+    return timing_index["rows"][start_offset:end_offset]
+
+
+def _timing_range_summary(timing_index, start_event_id, end_event_id):
+    start_offset, end_offset = _timing_range_bounds(timing_index, start_event_id, end_event_id)
+    total_gpu_time_ms = timing_index["prefix_gpu_ms"][end_offset] - timing_index["prefix_gpu_ms"][start_offset]
+    timed_event_count = timing_index["prefix_counts"][end_offset] - timing_index["prefix_counts"][start_offset]
+    return round(total_gpu_time_ms, 6), timed_event_count

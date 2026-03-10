@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import atexit
-import csv
 import os
 import secrets
 import socket
@@ -33,44 +32,6 @@ def _env_float(name: str, default: float) -> float:
         return float(raw)
     except ValueError:
         return default
-
-
-def _list_qrenderdoc_pids() -> set[int]:
-    try:
-        result = subprocess.run(
-            ["tasklist", "/FI", "IMAGENAME eq qrenderdoc.exe", "/FO", "CSV", "/NH"],
-            capture_output=True,
-            text=True,
-            check=False,
-            timeout=5.0,
-        )
-    except Exception:
-        return set()
-
-    pids: set[int] = set()
-    for row in csv.reader(result.stdout.splitlines()):
-        if len(row) < 2:
-            continue
-        if row[0].strip('"').lower() != "qrenderdoc.exe":
-            continue
-        try:
-            pids.add(int(row[1]))
-        except ValueError:
-            continue
-    return pids
-
-
-def _kill_process_tree(pid: int) -> None:
-    try:
-        subprocess.run(
-            ["taskkill", "/PID", str(pid), "/T", "/F"],
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-            check=False,
-            timeout=10.0,
-        )
-    except Exception:
-        pass
 
 
 class QRenderDocBridge:
@@ -159,7 +120,6 @@ class QRenderDocBridge:
         for attempt in range(2):
             self.close()
 
-            existing_pids = _list_qrenderdoc_pids()
             listen_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
             listen_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             listen_socket.bind(("127.0.0.1", 0))
@@ -198,9 +158,7 @@ class QRenderDocBridge:
 
             if connection is None:
                 self.close()
-                if attempt == 0 and existing_pids:
-                    for pid in existing_pids:
-                        _kill_process_tree(pid)
+                if attempt == 0:
                     time.sleep(1.0)
                     continue
                 raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path)
@@ -211,26 +169,18 @@ class QRenderDocBridge:
 
             try:
                 hello = read_message(reader)
+                self._accept_hello(hello, token)
             except Exception as exc:
                 writer.close()
                 reader.close()
                 close_socket(connection)
                 self.close()
-                if attempt == 0 and existing_pids:
-                    for pid in existing_pids:
-                        _kill_process_tree(pid)
+                if attempt == 0:
                     time.sleep(1.0)
                     continue
+                if isinstance(exc, ReplayFailureError):
+                    raise
                 raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path) from exc
-
-            try:
-                self._accept_hello(hello, token)
-            except Exception:
-                writer.close()
-                reader.close()
-                close_socket(connection)
-                self.close()
-                raise
 
             self._connection = connection
             self._reader = reader

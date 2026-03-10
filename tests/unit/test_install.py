@@ -35,6 +35,16 @@ def test_ensure_always_load_preserves_existing_key_order(tmp_path: Path) -> None
     assert payload["Last"] == 2
 
 
+def test_ensure_always_load_ignores_invalid_json(tmp_path: Path) -> None:
+    config_path = tmp_path / "UI.config"
+    config_path.write_text("{invalid", encoding="utf-8")
+
+    changed = install_module._ensure_always_load(config_path)
+
+    assert changed is False
+    assert config_path.read_text(encoding="utf-8") == "{invalid"
+
+
 def test_install_extension_skips_ui_config_write_when_always_load_disabled(
     tmp_path: Path,
     monkeypatch,
@@ -74,6 +84,38 @@ def test_install_extension_respects_env_opt_out(tmp_path: Path, monkeypatch) -> 
     assert target == extension_dir
     assert copied_to == [extension_dir]
     assert ensured_calls == []
+
+
+def test_install_extension_skips_copy_when_snapshot_matches(tmp_path: Path, monkeypatch) -> None:
+    copied_to: list[Path] = []
+    user_dir = tmp_path / "qrenderdoc"
+    extension_dir = user_dir / "extensions" / "renderdoc_mcp_bridge"
+    metadata = {
+        "version": 1,
+        "extension_name": "renderdoc_mcp_bridge",
+        "source_hash": "abc123",
+        "files": ["__init__.py", "extension.json", "timing.py"],
+    }
+
+    extension_dir.mkdir(parents=True, exist_ok=True)
+    for relative_path in metadata["files"]:
+        target_path = extension_dir / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("", encoding="utf-8")
+    (extension_dir / install_module.INSTALL_METADATA_FILENAME).write_text(
+        json.dumps(metadata, indent=2),
+        encoding="utf-8",
+    )
+
+    monkeypatch.setattr(install_module, "user_qrenderdoc_dir", lambda: user_dir)
+    monkeypatch.setattr(install_module, "extension_install_dir", lambda: extension_dir)
+    monkeypatch.setattr(install_module, "_build_install_metadata", lambda: metadata)
+    monkeypatch.setattr(install_module, "_copy_extension_files", lambda target_dir: copied_to.append(target_dir))
+
+    target = install_module.install_extension(always_load=False)
+
+    assert target == extension_dir
+    assert copied_to == []
 
 
 def test_install_cli_passes_explicit_opt_out(monkeypatch, capsys) -> None:

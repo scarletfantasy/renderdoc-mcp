@@ -191,6 +191,39 @@ def test_list_timing_events_pages_gpu_rows() -> None:
     assert result["total_gpu_time_ms"] == 2.5
 
 
+def test_list_passes_gpu_time_builds_reusable_timing_index() -> None:
+    nodes = [
+        _action(
+            100,
+            "Frame",
+            ["push_marker"],
+            children=[
+                _action(110, "Shadow", ["push_marker"], children=[_action(111, "ShadowDraw", ["draw"])]),
+                _action(120, "BasePass", ["push_marker"], children=[_action(121, "BaseDraw", ["draw"])]),
+            ],
+        )
+    ]
+    timing_payload = {
+        "timing_available": True,
+        "counter_name": "EventGPUDuration",
+        "rows": [
+            {"event_id": 121, "gpu_time_ms": 2.0},
+            {"event_id": 111, "gpu_time_ms": 1.0},
+        ],
+    }
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    first = frame_analysis.list_passes(analysis, parent_pass_id="pass:100-121", limit=50, sort_by="gpu_time", timing_payload=timing_payload)
+    second = frame_analysis.list_passes(analysis, parent_pass_id="pass:100-121", limit=50, sort_by="gpu_time", timing_payload=timing_payload)
+
+    assert [item["name"] for item in first["passes"]] == ["BasePass", "Shadow"]
+    assert first["passes"][0]["gpu_time_ms"] == 2.0
+    assert first["passes"][1]["gpu_time_ms"] == 1.0
+    assert second["passes"] == first["passes"]
+    assert "_timing_index" in timing_payload
+    assert [item["event_id"] for item in timing_payload["rows"]] == [111, 121]
+
+
 def test_build_performance_hotspots_uses_nested_passes() -> None:
     nodes = [
         _action(
