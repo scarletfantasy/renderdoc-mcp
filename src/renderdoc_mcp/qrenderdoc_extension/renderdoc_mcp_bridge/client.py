@@ -61,6 +61,7 @@ PROTOCOL_VERSION = 1
 CONNECT_RETRY_SECONDS = 20.0
 
 _bridge = None
+_METHOD_UNAVAILABLE = object()
 
 
 class BridgeError(Exception):
@@ -90,8 +91,8 @@ def _shader_stage_from_name(stage_name):
 
 
 def _select_pipeline_object(state, stage_name):
-    graphics = state.GetGraphicsPipelineObject()
-    compute = state.GetComputePipelineObject()
+    graphics = _call_method_variants(state, "GetGraphicsPipelineObject", [()], default=None)
+    compute = _call_method_variants(state, "GetComputePipelineObject", [()], default=None)
 
     if stage_name == "Compute" and _resource_id(compute):
         return ("compute_pipeline_object", compute)
@@ -129,6 +130,50 @@ def _safe_int(value, default=0):
         return int(value)
     except Exception:
         return int(default)
+
+
+def _call_method_variants(obj, method_name, arg_variants, default=None):
+    method = getattr(obj, method_name, None)
+    if method is None:
+        return default
+
+    for args in arg_variants:
+        try:
+            return method(*args)
+        except TypeError:
+            continue
+        except AttributeError:
+            return default
+
+    return default
+
+
+def _safe_list(value):
+    try:
+        return list(value or [])
+    except Exception:
+        return []
+
+
+def _load_capture_with_fallback(ctx, capture_path):
+    if rd is None:
+        return _METHOD_UNAVAILABLE
+
+    replay_options = rd.ReplayOptions()
+    signatures = [
+        (capture_path, replay_options, capture_path, False, True),
+        (capture_path, replay_options, capture_path, False),
+        (capture_path, replay_options, capture_path),
+        (capture_path, replay_options),
+        (capture_path,),
+    ]
+
+    return _call_method_variants(ctx, "LoadCapture", signatures, default=_METHOD_UNAVAILABLE)
+
+
+def _get_disassembly_targets(controller):
+    targets = _call_method_variants(controller, "GetDisassemblyTargets", [(True,), ()], default=[])
+    return [str(item) for item in _safe_list(targets)]
 
 
 def _counter_value_as_float(value, result_type_name, byte_width):
@@ -191,8 +236,9 @@ def _serialize_pixel_value(value):
 
 
 class BridgeClient(object):
-    def __init__(self, ctx):
+    def __init__(self, ctx, renderdoc_version=""):
         self.ctx = ctx
+        self.renderdoc_version = str(renderdoc_version or "")
         self.mqt = ctx.Extensions().GetMiniQtHelper()
         self.sock = None
         self.stop_event = threading.Event()
@@ -305,7 +351,7 @@ class BridgeClient(object):
                         "type": "hello",
                         "token": token,
                         "protocol_version": PROTOCOL_VERSION,
-                        "renderdoc_version": os.environ.get("RENDERDOC_VERSION", ""),
+                        "renderdoc_version": self.renderdoc_version or os.environ.get("RENDERDOC_VERSION", ""),
                     }
                 )
                 _log("Bridge connected and hello sent.")
@@ -746,7 +792,17 @@ class BridgeClient(object):
             )
 
         self._clear_analysis_cache()
-        self.ctx.LoadCapture(capture_path, rd.ReplayOptions(), capture_path, False, True)
+        result = _load_capture_with_fallback(self.ctx, capture_path)
+        if result is _METHOD_UNAVAILABLE:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "replay_failure",
+                        "message": "RenderDoc did not expose a compatible LoadCapture signature.",
+                        "details": {"capture_path": capture_path},
+                    }
+                )
+            )
         if not self.ctx.IsCaptureLoaded():
             raise RuntimeError(
                 json.dumps(
@@ -864,24 +920,66 @@ class BridgeClient(object):
         response = {"event_id": int(event_id)}
 
         def callback(controller):
-            state = controller.GetPipelineState()
             response["api"] = _api_name(controller)
             response["action"] = {
                 "event_id": int(action.eventId),
                 "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
                 "flags": _action_flags(action),
             }
+            state = _call_method_variants(controller, "GetPipelineState", [()], default=None)
+            if state is None:
+                response["pipeline"] = {
+                    "available": False,
+                    "reason": "RenderDoc did not expose GetPipelineState in this build.",
+                    "topology": "Unknown",
+                    "graphics_pipeline_object": "",
+                    "compute_pipeline_object": "",
+                    "index_buffer": _serialize_bound_vbuffer(self.ctx, None),
+                    "vertex_buffers": [],
+                    "vertex_inputs": [],
+                    "output_targets": [],
+                    "depth_target": _serialize_descriptor(self.ctx, None),
+                    "depth_resolve_target": _serialize_descriptor(self.ctx, None),
+                    "descriptor_accesses": [],
+                    "shaders": [],
+                }
+                return
+
+            descriptor_accesses = _call_method_variants(state, "GetDescriptorAccess", [()], default=[])
             response["pipeline"] = {
-                "topology": _enum_name(state.GetPrimitiveTopology()),
-                "graphics_pipeline_object": _resource_id(state.GetGraphicsPipelineObject()),
-                "compute_pipeline_object": _resource_id(state.GetComputePipelineObject()),
-                "index_buffer": _serialize_bound_vbuffer(self.ctx, state.GetIBuffer()),
-                "vertex_buffers": [_serialize_bound_vbuffer(self.ctx, vb) for vb in state.GetVBuffers()],
-                "vertex_inputs": [_serialize_vertex_input(attr) for attr in state.GetVertexInputs()],
-                "output_targets": [_serialize_descriptor(self.ctx, desc) for desc in state.GetOutputTargets()],
-                "depth_target": _serialize_descriptor(self.ctx, state.GetDepthTarget()),
-                "depth_resolve_target": _serialize_descriptor(self.ctx, state.GetDepthResolveTarget()),
-                "descriptor_accesses": [_serialize_descriptor_access(item) for item in state.GetDescriptorAccess()],
+                "available": True,
+                "topology": _enum_name(_call_method_variants(state, "GetPrimitiveTopology", [()], default="Unknown")),
+                "graphics_pipeline_object": _resource_id(
+                    _call_method_variants(state, "GetGraphicsPipelineObject", [()], default=None)
+                ),
+                "compute_pipeline_object": _resource_id(
+                    _call_method_variants(state, "GetComputePipelineObject", [()], default=None)
+                ),
+                "index_buffer": _serialize_bound_vbuffer(
+                    self.ctx,
+                    _call_method_variants(state, "GetIBuffer", [()], default=None),
+                ),
+                "vertex_buffers": [
+                    _serialize_bound_vbuffer(self.ctx, vb)
+                    for vb in _safe_list(_call_method_variants(state, "GetVBuffers", [()], default=[]))
+                ],
+                "vertex_inputs": [
+                    _serialize_vertex_input(attr)
+                    for attr in _safe_list(_call_method_variants(state, "GetVertexInputs", [()], default=[]))
+                ],
+                "output_targets": [
+                    _serialize_descriptor(self.ctx, desc)
+                    for desc in _safe_list(_call_method_variants(state, "GetOutputTargets", [()], default=[]))
+                ],
+                "depth_target": _serialize_descriptor(
+                    self.ctx,
+                    _call_method_variants(state, "GetDepthTarget", [()], default=None),
+                ),
+                "depth_resolve_target": _serialize_descriptor(
+                    self.ctx,
+                    _call_method_variants(state, "GetDepthResolveTarget", [()], default=None),
+                ),
+                "descriptor_accesses": [_serialize_descriptor_access(item) for item in _safe_list(descriptor_accesses)],
                 "shaders": [],
             }
 
@@ -907,15 +1005,25 @@ class BridgeClient(object):
                 "flags": _action_flags(action),
             }
             if api_name == "D3D12" and hasattr(controller, "GetD3D12PipelineState"):
-                response["api_pipeline"] = _serialize_d3d12_pipeline_state(
-                    self.ctx,
-                    controller.GetD3D12PipelineState(),
-                )
+                value = _call_method_variants(controller, "GetD3D12PipelineState", [()], default=None)
+                if value is None:
+                    response["api_pipeline"] = {
+                        "api": api_name,
+                        "available": False,
+                        "reason": "RenderDoc did not expose a compatible D3D12 pipeline accessor in this build.",
+                    }
+                else:
+                    response["api_pipeline"] = _serialize_d3d12_pipeline_state(self.ctx, value)
             elif api_name == "Vulkan" and hasattr(controller, "GetVulkanPipelineState"):
-                response["api_pipeline"] = _serialize_vulkan_pipeline_state(
-                    self.ctx,
-                    controller.GetVulkanPipelineState(),
-                )
+                value = _call_method_variants(controller, "GetVulkanPipelineState", [()], default=None)
+                if value is None:
+                    response["api_pipeline"] = {
+                        "api": api_name,
+                        "available": False,
+                        "reason": "RenderDoc did not expose a compatible Vulkan pipeline accessor in this build.",
+                    }
+                else:
+                    response["api_pipeline"] = _serialize_vulkan_pipeline_state(self.ctx, value)
             else:
                 response["api_pipeline"] = {
                     "api": api_name,
@@ -947,7 +1055,35 @@ class BridgeClient(object):
                     )
                 )
 
-            state = controller.GetPipelineState()
+            state = _call_method_variants(controller, "GetPipelineState", [()], default=None)
+            if state is None:
+                response["api"] = _api_name(controller)
+                response["action"] = {
+                    "event_id": int(action.eventId),
+                    "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
+                    "flags": _action_flags(action),
+                }
+                response["shader"] = {
+                    "stage": _enum_name(stage),
+                    "shader_id": "",
+                    "shader_name": "",
+                    "entry_point": "",
+                    "read_only_resources": [],
+                    "read_write_resources": [],
+                    "samplers": [],
+                    "constant_blocks": [],
+                }
+                response["disassembly"] = {
+                    "available": False,
+                    "reason": "RenderDoc did not expose GetPipelineState in this build.",
+                    "target": "",
+                    "available_targets": [],
+                    "pipeline_object_kind": "",
+                    "pipeline_object_id": "",
+                    "text": "",
+                }
+                return
+
             shader_payload = _serialize_shader_stage(self.ctx, state, stage)
             if shader_payload is None:
                 raise RuntimeError(
@@ -960,17 +1096,26 @@ class BridgeClient(object):
                     )
                 )
 
-            targets = [str(item) for item in controller.GetDisassemblyTargets(True)]
+            response["api"] = _api_name(controller)
+            response["action"] = {
+                "event_id": int(action.eventId),
+                "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
+                "flags": _action_flags(action),
+            }
+            response["shader"] = shader_payload
+
+            targets = _get_disassembly_targets(controller)
             if not targets:
-                raise RuntimeError(
-                    json.dumps(
-                        {
-                            "code": "replay_failure",
-                            "message": "RenderDoc did not report any shader disassembly targets.",
-                            "details": {"event_id": int(event_id), "stage": shader_payload["stage"]},
-                        }
-                    )
-                )
+                response["disassembly"] = {
+                    "available": False,
+                    "reason": "RenderDoc did not report any shader disassembly targets.",
+                    "target": "",
+                    "available_targets": [],
+                    "pipeline_object_kind": "",
+                    "pipeline_object_id": "",
+                    "text": "",
+                }
+                return
 
             selected_target = targets[0]
             if target:
@@ -991,29 +1136,35 @@ class BridgeClient(object):
                         )
                     )
 
-            reflection = state.GetShaderReflection(stage)
+            reflection = _call_method_variants(state, "GetShaderReflection", [(stage,)], default=None)
             if reflection is None:
-                raise RuntimeError(
-                    json.dumps(
-                        {
-                            "code": "replay_failure",
-                            "message": "RenderDoc did not return shader reflection for the selected stage.",
-                            "details": {"event_id": int(event_id), "stage": shader_payload["stage"]},
-                        }
-                    )
-                )
+                pipeline_object_kind, pipeline_object = _select_pipeline_object(state, shader_payload["stage"])
+                response["disassembly"] = {
+                    "available": False,
+                    "reason": "RenderDoc did not return shader reflection for the selected stage.",
+                    "target": selected_target,
+                    "available_targets": targets,
+                    "pipeline_object_kind": pipeline_object_kind,
+                    "pipeline_object_id": _resource_id(pipeline_object),
+                    "text": "",
+                }
+                return
 
             pipeline_object_kind, pipeline_object = _select_pipeline_object(state, shader_payload["stage"])
-            disassembly_text = str(controller.DisassembleShader(pipeline_object, reflection, selected_target) or "")
+            disassembly_text = ""
+            disassembly_available = False
+            disassembly_reason = ""
+            try:
+                disassembly_text = str(controller.DisassembleShader(pipeline_object, reflection, selected_target) or "")
+                disassembly_available = True
+            except TypeError:
+                disassembly_reason = "RenderDoc did not expose a compatible DisassembleShader signature."
+            except AttributeError:
+                disassembly_reason = "RenderDoc did not expose DisassembleShader in this build."
 
-            response["api"] = _api_name(controller)
-            response["action"] = {
-                "event_id": int(action.eventId),
-                "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
-                "flags": _action_flags(action),
-            }
-            response["shader"] = shader_payload
             response["disassembly"] = {
+                "available": disassembly_available,
+                "reason": disassembly_reason,
                 "target": selected_target,
                 "available_targets": targets,
                 "pipeline_object_kind": pipeline_object_kind,
@@ -1289,7 +1440,7 @@ def register(version, ctx):
     global _bridge
     _log("register() called for version {}".format(version))
     if _bridge is None:
-        bridge = BridgeClient(ctx)
+        bridge = BridgeClient(ctx, renderdoc_version=version)
         if bridge.start():
             _bridge = bridge
             _log("Bridge registered successfully.")

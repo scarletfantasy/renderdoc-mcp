@@ -87,6 +87,7 @@ class QRenderDocBridge:
         self._current_capture: str | None = None
         self._current_capture_token: tuple[int, int] | None = None
         self._log_path: str | None = None
+        self.renderdoc_version: str | None = None
         atexit.register(self.close)
 
     def close(self) -> None:
@@ -95,6 +96,7 @@ class QRenderDocBridge:
             self._process = None
             self._current_capture = None
             self._current_capture_token = None
+            self.renderdoc_version = None
             if self._writer is not None:
                 try:
                     self._writer.close()
@@ -221,15 +223,14 @@ class QRenderDocBridge:
                     continue
                 raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path) from exc
 
-            if hello.get("type") != "hello" or hello.get("token") != token:
+            try:
+                self._accept_hello(hello, token)
+            except Exception:
                 writer.close()
                 reader.close()
                 close_socket(connection)
                 self.close()
-                raise ReplayFailureError(
-                    "Received an invalid bridge handshake from qrenderdoc.",
-                    {"hello": hello, "log_path": self._log_path},
-                )
+                raise
 
             self._connection = connection
             self._reader = reader
@@ -239,6 +240,21 @@ class QRenderDocBridge:
             return
 
         raise BridgeHandshakeTimeoutError(self.timeout_seconds, last_log_path)
+
+    def _accept_hello(self, hello: dict[str, Any], token: str) -> None:
+        if hello.get("type") != "hello" or hello.get("token") != token:
+            self.renderdoc_version = None
+            raise ReplayFailureError(
+                "Received an invalid bridge handshake from qrenderdoc.",
+                {"hello": hello, "log_path": self._log_path},
+            )
+
+        renderdoc_version = hello.get("renderdoc_version")
+        if isinstance(renderdoc_version, str):
+            normalized = renderdoc_version.strip()
+            self.renderdoc_version = normalized or None
+        else:
+            self.renderdoc_version = None
 
     def _call_locked(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
         if self._reader is None or self._writer is None:

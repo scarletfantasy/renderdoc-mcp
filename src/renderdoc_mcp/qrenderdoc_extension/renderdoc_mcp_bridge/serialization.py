@@ -9,12 +9,30 @@ def _enum_name(value):
 
 
 def _resource_id(value):
+    if value is None:
+        return ""
     try:
         if rd is not None and value == rd.ResourceId.Null():
             return ""
     except Exception:
         pass
     return str(value)
+
+
+def _call_method_variants(obj, method_name, arg_variants, default=None):
+    method = getattr(obj, method_name, None)
+    if method is None:
+        return default
+
+    for args in arg_variants:
+        try:
+            return method(*args)
+        except TypeError:
+            continue
+        except AttributeError:
+            return default
+
+    return default
 
 
 def _resource_name(ctx, resource_id):
@@ -99,7 +117,10 @@ def _action_flags(action):
 
 
 def _api_name(controller):
-    return _enum_name(controller.GetAPIProperties().pipelineType)
+    try:
+        return _enum_name(controller.GetAPIProperties().pipelineType)
+    except Exception:
+        return "Unknown"
 
 
 def _serialize_event(api_event):
@@ -225,31 +246,31 @@ def _count_actions(actions):
 
 def _serialize_bound_vbuffer(ctx, vb):
     return {
-        "resource_id": _resource_id(vb.resourceId),
-        "resource_name": _resource_name(ctx, vb.resourceId),
-        "byte_offset": int(vb.byteOffset),
-        "byte_stride": int(vb.byteStride),
-        "byte_size": int(vb.byteSize),
+        "resource_id": _resource_id(getattr(vb, "resourceId", None)),
+        "resource_name": _resource_name(ctx, getattr(vb, "resourceId", None)),
+        "byte_offset": int(getattr(vb, "byteOffset", 0)),
+        "byte_stride": int(getattr(vb, "byteStride", 0)),
+        "byte_size": int(getattr(vb, "byteSize", 0)),
     }
 
 
 def _serialize_descriptor(ctx, descriptor):
     return {
-        "type": _enum_name(descriptor.type),
-        "resource_id": _resource_id(descriptor.resource),
-        "resource_name": _resource_name(ctx, descriptor.resource),
-        "secondary_resource_id": _resource_id(descriptor.secondary),
-        "secondary_resource_name": _resource_name(ctx, descriptor.secondary),
-        "view_id": _resource_id(descriptor.view),
-        "view_name": _resource_name(ctx, descriptor.view),
-        "byte_offset": int(descriptor.byteOffset),
-        "byte_size": int(descriptor.byteSize),
-        "element_byte_size": int(descriptor.elementByteSize),
-        "first_mip": int(descriptor.firstMip),
-        "num_mips": int(descriptor.numMips),
-        "first_slice": int(descriptor.firstSlice),
-        "num_slices": int(descriptor.numSlices),
-        "format": _resource_format(descriptor.format),
+        "type": _enum_name(getattr(descriptor, "type", "")),
+        "resource_id": _resource_id(getattr(descriptor, "resource", None)),
+        "resource_name": _resource_name(ctx, getattr(descriptor, "resource", None)),
+        "secondary_resource_id": _resource_id(getattr(descriptor, "secondary", None)),
+        "secondary_resource_name": _resource_name(ctx, getattr(descriptor, "secondary", None)),
+        "view_id": _resource_id(getattr(descriptor, "view", None)),
+        "view_name": _resource_name(ctx, getattr(descriptor, "view", None)),
+        "byte_offset": int(getattr(descriptor, "byteOffset", 0)),
+        "byte_size": int(getattr(descriptor, "byteSize", 0)),
+        "element_byte_size": int(getattr(descriptor, "elementByteSize", 0)),
+        "first_mip": int(getattr(descriptor, "firstMip", 0)),
+        "num_mips": int(getattr(descriptor, "numMips", 0)),
+        "first_slice": int(getattr(descriptor, "firstSlice", 0)),
+        "num_slices": int(getattr(descriptor, "numSlices", 0)),
+        "format": _resource_format(getattr(descriptor, "format", None)),
     }
 
 
@@ -291,14 +312,14 @@ def _serialize_used_descriptor(ctx, used):
 
 def _serialize_vertex_input(attribute):
     return {
-        "name": str(attribute.name),
-        "vertex_buffer": int(attribute.vertexBuffer),
-        "byte_offset": int(attribute.byteOffset),
-        "per_instance": bool(attribute.perInstance),
-        "instance_rate": int(attribute.instanceRate),
-        "format": _resource_format(attribute.format),
-        "generic_enabled": bool(attribute.genericEnabled),
-        "used": bool(attribute.used),
+        "name": str(getattr(attribute, "name", "")),
+        "vertex_buffer": int(getattr(attribute, "vertexBuffer", 0)),
+        "byte_offset": int(getattr(attribute, "byteOffset", 0)),
+        "per_instance": bool(getattr(attribute, "perInstance", False)),
+        "instance_rate": int(getattr(attribute, "instanceRate", 0)),
+        "format": _resource_format(getattr(attribute, "format", None)),
+        "generic_enabled": bool(getattr(attribute, "genericEnabled", False)),
+        "used": bool(getattr(attribute, "used", False)),
     }
 
 
@@ -531,16 +552,16 @@ def _shader_stage_values():
 
 
 def _serialize_shader_stage(ctx, state, stage):
-    shader_id = state.GetShader(stage)
+    shader_id = _call_method_variants(state, "GetShader", [(stage,)], default=None)
     if _resource_id(shader_id) == "":
         return None
 
-    reflection = state.GetShaderReflection(stage)
+    reflection = _call_method_variants(state, "GetShaderReflection", [(stage,)], default=None)
     payload = {
         "stage": _enum_name(stage),
         "shader_id": _resource_id(shader_id),
         "shader_name": _resource_name(ctx, shader_id),
-        "entry_point": str(state.GetShaderEntryPoint(stage) or ""),
+        "entry_point": str(_call_method_variants(state, "GetShaderEntryPoint", [(stage,)], default="") or ""),
         "read_only_resources": [],
         "read_write_resources": [],
         "samplers": [],
@@ -557,13 +578,22 @@ def _serialize_shader_stage(ctx, state, stage):
             "constant_block_count": len(reflection.constantBlocks),
         }
 
-    try:
-        payload["read_only_resources"] = [_serialize_used_descriptor(ctx, item) for item in state.GetReadOnlyResources(stage, True)]
-        payload["read_write_resources"] = [_serialize_used_descriptor(ctx, item) for item in state.GetReadWriteResources(stage, True)]
-        payload["samplers"] = [_serialize_used_descriptor(ctx, item) for item in state.GetSamplers(stage, True)]
-        payload["constant_blocks"] = [_serialize_used_descriptor(ctx, item) for item in state.GetConstantBlocks(stage, True)]
-    except Exception:
-        pass
+    payload["read_only_resources"] = [
+        _serialize_used_descriptor(ctx, item)
+        for item in _safe_list(_call_method_variants(state, "GetReadOnlyResources", [(stage, True), (stage,)], default=[]))
+    ]
+    payload["read_write_resources"] = [
+        _serialize_used_descriptor(ctx, item)
+        for item in _safe_list(_call_method_variants(state, "GetReadWriteResources", [(stage, True), (stage,)], default=[]))
+    ]
+    payload["samplers"] = [
+        _serialize_used_descriptor(ctx, item)
+        for item in _safe_list(_call_method_variants(state, "GetSamplers", [(stage, True), (stage,)], default=[]))
+    ]
+    payload["constant_blocks"] = [
+        _serialize_used_descriptor(ctx, item)
+        for item in _safe_list(_call_method_variants(state, "GetConstantBlocks", [(stage, True), (stage,)], default=[]))
+    ]
 
     return payload
 

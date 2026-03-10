@@ -2,13 +2,23 @@
 
 `renderdoc-mcp` is a local stdio MCP server for inspecting existing RenderDoc `.rdc` captures on Windows.
 
-It launches `qrenderdoc.exe`, installs a small RenderDoc Python extension into `%APPDATA%\qrenderdoc\extensions`, and bridges MCP tool calls to RenderDoc's embedded Python API over a localhost socket.
-Within a single `renderdoc-mcp` process, requests for the same capture reuse the same `qrenderdoc` session.
+It launches `qrenderdoc.exe`, installs a bundled RenderDoc Python extension into `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge`, and bridges MCP tool calls to RenderDoc's embedded Python API over a localhost socket.
+
+Each call to `renderdoc_open_capture` creates a new capture session and returns a `capture_id`. Subsequent tools reuse that session through `capture_id` until you close it or it is evicted by the idle timeout.
+
+## Version support
+
+- Minimum supported RenderDoc version: `1.43`
+- Verified baseline: `1.43`
+- Newer RenderDoc builds are supported on a best-effort forward-compatible basis with API fallbacks where practical
 
 ## Features
 
+- `renderdoc_open_capture`
+- `renderdoc_close_capture`
 - `renderdoc_get_capture_summary`
 - `renderdoc_analyze_frame`
+- `renderdoc_get_action_tree`
 - `renderdoc_list_actions`
 - `renderdoc_list_passes`
 - `renderdoc_get_pass_details`
@@ -16,6 +26,7 @@ Within a single `renderdoc-mcp` process, requests for the same capture reuse the
 - `renderdoc_get_performance_hotspots`
 - `renderdoc_get_action_details`
 - `renderdoc_get_pipeline_state`
+- `renderdoc_get_api_pipeline_state`
 - `renderdoc_get_shader_code`
 - `renderdoc_list_resources`
 - `renderdoc_get_pixel_history`
@@ -24,23 +35,40 @@ Within a single `renderdoc-mcp` process, requests for the same capture reuse the
 - `renderdoc_get_buffer_data`
 - `renderdoc_save_texture_to_file`
 - `renderdoc://recent-captures`
-- `renderdoc://capture/{base64url_path}/summary`
+- `renderdoc://capture/{capture_id}/summary`
 
-## Analysis model
+## Quick start
 
-`renderdoc-mcp` now exposes two layers of tooling:
-
-- Low-level primitives for action trees, event details, pipeline state, shader disassembly, and resources.
-- High-level frame analysis that groups the capture into top-level passes, ranks draw-heavy and compute-heavy hotspots, and highlights the tail UI/present chain.
-
-The pass classifier is intentionally engine-agnostic. It uses action structure, outputs, draw or dispatch counts, event boundaries, and naming hints when available. Naming hints are advisory only and low weight.
-
-## High-level analysis flow
-
-For a quick pass summary, start with:
+Open a capture first:
 
 ```powershell
-renderdoc_analyze_frame(capture_path="C:\\captures\\frame.rdc")
+renderdoc_open_capture(capture_path="C:\\captures\\frame.rdc")
+```
+
+The response includes `capture_id`, `capture_path`, and `meta.renderdoc_version` when the bridge reports it.
+
+Use that `capture_id` for all follow-up tools:
+
+```powershell
+renderdoc_get_capture_summary(capture_id="<capture_id>")
+```
+
+```powershell
+renderdoc_analyze_frame(capture_id="<capture_id>")
+```
+
+When you are done:
+
+```powershell
+renderdoc_close_capture(capture_id="<capture_id>")
+```
+
+## Frame analysis
+
+For a quick pass summary:
+
+```powershell
+renderdoc_analyze_frame(capture_id="<capture_id>")
 ```
 
 The result includes:
@@ -54,38 +82,36 @@ To include a top-level pass timing summary when GPU duration counters are availa
 
 ```powershell
 renderdoc_analyze_frame(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   include_timing_summary=true
 )
 ```
 
 To drill into a specific pass:
 
-1. Call `renderdoc_list_passes(capture_path=..., limit=100)`.
+1. Call `renderdoc_list_passes(capture_id=..., limit=100)`.
 2. Pick a `pass_id`.
-3. Call `renderdoc_get_pass_details(capture_path=..., pass_id=...)`.
-
-`renderdoc_get_pass_details` returns the nested pass structure, representative events, output summaries, and child pass breakdown.
+3. Call `renderdoc_get_pass_details(capture_id=..., pass_id=...)`.
 
 To add timing data to a pass:
 
 ```powershell
-renderdoc_get_timing_data(capture_path="C:\\captures\\frame.rdc", pass_id="pass:100-250")
+renderdoc_get_timing_data(capture_id="<capture_id>", pass_id="pass:100-250")
 ```
 
 For frame-level hotspots:
 
 ```powershell
-renderdoc_get_performance_hotspots(capture_path="C:\\captures\\frame.rdc")
+renderdoc_get_performance_hotspots(capture_id="<capture_id>")
 ```
 
 If the replay device exposes `GPUCounter.EventGPUDuration`, hotspots are ranked by real GPU time. Otherwise the tool falls back to draw, dispatch, copy, and clear heuristics.
 
-For quick pass triage, `renderdoc_list_passes` can sort by GPU time or simple structural metrics:
+For quick pass triage, `renderdoc_list_passes` can sort by GPU time or structural metrics:
 
 ```powershell
 renderdoc_list_passes(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   sort_by="gpu_time",
   threshold_ms=0.5,
   limit=20
@@ -94,51 +120,55 @@ renderdoc_list_passes(
 
 If GPU timing is unavailable, `sort_by="gpu_time"` falls back to event order and reports that in the result.
 
-## Low-level action access
+## Actions and pipeline state
 
-`renderdoc_list_actions` keeps the legacy tree preview by default. When no `cursor` or `limit` is supplied, it returns a tree preview capped at `500` visible nodes and includes `has_more` and `next_cursor`.
-
-To page through the full action list without truncation, pass `cursor` and `limit`:
+`renderdoc_get_action_tree` returns a tree preview of the action hierarchy:
 
 ```powershell
-renderdoc_list_actions(capture_path="C:\\captures\\frame.rdc", cursor=0, limit=100)
+renderdoc_get_action_tree(capture_id="<capture_id>", max_depth=2)
 ```
 
-Paged action results use a flat preorder list with `depth`, `parent_event_id`, `has_more`, and `next_cursor`.
+To page through the full action list:
+
+```powershell
+renderdoc_list_actions(capture_id="<capture_id>", cursor=0, limit=100)
+```
+
+To fetch API-agnostic pipeline details:
+
+```powershell
+renderdoc_get_pipeline_state(capture_id="<capture_id>", event_id=1234)
+```
+
+To fetch API-specific pipeline details when implemented for the capture API:
+
+```powershell
+renderdoc_get_api_pipeline_state(capture_id="<capture_id>", event_id=1234)
+```
+
+On D3D12 this can include descriptor heap and root signature details. On Vulkan it can include pipeline, descriptor set or descriptor buffer, and current render pass information. If the active RenderDoc build does not expose a compatible API-specific accessor, the response reports `available: false` instead of failing the whole tool call.
 
 To fetch shader disassembly for a specific event and stage:
 
 ```powershell
-renderdoc_get_shader_code(capture_path="C:\\captures\\frame.rdc", event_id=1234, stage="pixel")
+renderdoc_get_shader_code(capture_id="<capture_id>", event_id=1234, stage="pixel")
 ```
 
-The result includes the selected shader stage metadata, available disassembly targets reported by RenderDoc, and the disassembly text for the chosen target.
+If a newer RenderDoc build changes the shader disassembly API surface, the response keeps the shader metadata and reports the disassembly as unavailable instead of failing the request where possible.
 
-To fetch API-specific pipeline details in addition to the portable pipeline abstraction:
-
-```powershell
-renderdoc_get_pipeline_state(
-  capture_path="C:\\captures\\frame.rdc",
-  event_id=1234,
-  detail_level="api_specific"
-)
-```
-
-On D3D12 this adds descriptor heap and root signature details. On Vulkan it adds pipeline, descriptor set or buffer, and current render pass information.
-
-## Resource inspection
+## Resources and pixel inspection
 
 Start by listing resources:
 
 ```powershell
-renderdoc_list_resources(capture_path="C:\\captures\\frame.rdc", kind="all")
+renderdoc_list_resources(capture_id="<capture_id>", kind="all")
 ```
 
-Use the returned `resource_id` values for content inspection:
+Use the returned resource IDs for content inspection:
 
 ```powershell
 renderdoc_get_texture_data(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   texture_id="1234567890",
   mip_level=0,
   x=0,
@@ -150,7 +180,7 @@ renderdoc_get_texture_data(
 
 ```powershell
 renderdoc_get_buffer_data(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   buffer_id="9876543210",
   offset=0,
   size=64
@@ -161,19 +191,17 @@ To export a texture to disk:
 
 ```powershell
 renderdoc_save_texture_to_file(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   texture_id="1234567890",
   output_path="C:\\captures\\albedo.png"
 )
 ```
 
-## Pixel debugging
-
 For pixel history against a specific texture and subresource:
 
 ```powershell
 renderdoc_get_pixel_history(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   texture_id="1234567890",
   x=512,
   y=384
@@ -184,7 +212,7 @@ To collapse that history into a draw-centric impact summary:
 
 ```powershell
 renderdoc_debug_pixel(
-  capture_path="C:\\captures\\frame.rdc",
+  capture_id="<capture_id>",
   texture_id="1234567890",
   x=512,
   y=384
@@ -198,7 +226,27 @@ uv sync --group dev
 uv run renderdoc-install-extension
 ```
 
-The installer copies the bundled extension into `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge` and ensures it is listed in `AlwaysLoad_Extensions`.
+The installer always copies the bundled extension into `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge`.
+
+By default it also ensures that `%APPDATA%\qrenderdoc\UI.config` contains `renderdoc_mcp_bridge` inside `AlwaysLoad_Extensions`.
+
+Behavior details:
+
+- The installer only changes the `AlwaysLoad_Extensions` key.
+- If `renderdoc_mcp_bridge` is already present, it leaves `UI.config` untouched.
+- It does not rewrite unrelated keys.
+
+To install the extension without modifying `UI.config`:
+
+```powershell
+uv run renderdoc-install-extension --no-always-load
+```
+
+You can also disable the `UI.config` update for both manual installs and automatic startup installs:
+
+```powershell
+$env:RENDERDOC_INSTALL_ALWAYS_LOAD = "0"
+```
 
 ## Run
 
@@ -210,7 +258,8 @@ Optional environment variables:
 
 - `RENDERDOC_QRENDERDOC_PATH`: absolute path to `qrenderdoc.exe`
 - `RENDERDOC_BRIDGE_TIMEOUT_SECONDS`: handshake timeout, default `30`
-- `RENDERDOC_CAPTURE_SESSION_IDLE_SECONDS`: idle timeout in seconds for per-capture `qrenderdoc` sessions, default `300`; set to `0` or a negative value to disable idle eviction
+- `RENDERDOC_CAPTURE_SESSION_IDLE_SECONDS`: idle timeout in seconds for per-capture sessions, default `300`; set to `0` or a negative value to disable idle eviction
+- `RENDERDOC_INSTALL_ALWAYS_LOAD`: `0/false/no/off` to skip editing `UI.config` during extension installation
 
 ## Claude Desktop example
 

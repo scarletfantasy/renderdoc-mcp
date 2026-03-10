@@ -15,6 +15,7 @@ class DummyBridge:
         self.loaded: list[str] = []
         self.calls: list[tuple[str, dict]] = []
         self.closed = 0
+        self.renderdoc_version = "1.43"
 
     def ensure_capture_loaded(self, capture_path: str):
         self.loaded.append(capture_path)
@@ -186,7 +187,7 @@ def test_open_capture_returns_capture_id_and_summary(tmp_path: Path) -> None:
     assert response["capture_id"]
     assert response["capture_path"] == capture_path
     assert response["api"] == "D3D12"
-    assert response["meta"] == {}
+    assert response["meta"] == {"renderdoc_version": "1.43"}
     assert created[0].loaded == [capture_path]
     assert created[0].calls == [("get_capture_summary", {})]
 
@@ -201,6 +202,7 @@ def test_handlers_reuse_capture_id_session_and_attach_meta(tmp_path: Path) -> No
     pipeline = application.actions.renderdoc_get_api_pipeline_state(opened["capture_id"], event_id="42")
 
     assert actions["capture_id"] == opened["capture_id"]
+    assert actions["meta"]["renderdoc_version"] == "1.43"
     assert actions["meta"]["page"]["cursor"] == "10"
     assert passes["meta"]["page"]["limit"] == 5
     assert passes["sort_by"] == "gpu_time"
