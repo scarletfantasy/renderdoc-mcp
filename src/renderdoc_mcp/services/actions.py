@@ -6,6 +6,41 @@ from renderdoc_mcp.analysis.frame_analysis import MAX_PAGE_LIMIT
 from renderdoc_mcp.errors import ReplayFailureError, RenderDocMCPError
 from renderdoc_mcp.services.common import ServiceContext
 
+SUPPORTED_SHADER_STAGES = {
+    "vertex": "Vertex",
+    "vs": "Vertex",
+    "hull": "Hull",
+    "hs": "Hull",
+    "domain": "Domain",
+    "ds": "Domain",
+    "geometry": "Geometry",
+    "gs": "Geometry",
+    "pixel": "Pixel",
+    "fragment": "Pixel",
+    "ps": "Pixel",
+    "compute": "Compute",
+    "cs": "Compute",
+    "task": "Task",
+    "amplification": "Task",
+    "as": "Task",
+    "mesh": "Mesh",
+    "raygen": "RayGen",
+    "raygeneration": "RayGen",
+    "intersection": "Intersection",
+    "anyhit": "AnyHit",
+    "closesthit": "ClosestHit",
+    "miss": "Miss",
+    "callable": "Callable",
+}
+
+
+def _normalize_shader_stage(stage: str | None) -> str | None:
+    if stage is None:
+        return None
+
+    key = stage.strip().replace("_", "").replace("-", "").replace(" ", "").lower()
+    return SUPPORTED_SHADER_STAGES.get(key)
+
 
 class ActionQueries:
     def __init__(self, context: ServiceContext) -> None:
@@ -89,4 +124,38 @@ class ActionQueries:
             capture_path,
             "Fetched pipeline state for the selected event.",
             lambda normalized: self.context.capture_tool(normalized, "get_pipeline_state", {"event_id": event_id}),
+        )
+
+    def get_shader_code(
+        self,
+        capture_path: str,
+        event_id: int,
+        stage: str,
+        target: str | None = None,
+    ) -> dict[str, Any]:
+        try:
+            event_id = self.context.normalize_required_int(event_id, "event_id")
+            normalized_stage = _normalize_shader_stage(self.context.normalize_optional_string(stage))
+            normalized_target = self.context.normalize_optional_string(target)
+        except RenderDocMCPError as exc:
+            return self.context.error_response(capture_path, exc, "Fetched shader code for the selected stage.")
+
+        if normalized_stage is None:
+            return self.context.error_response(
+                capture_path,
+                ReplayFailureError(
+                    "stage must name a supported shader stage.",
+                    {"stage": stage, "supported_stages": sorted(set(SUPPORTED_SHADER_STAGES.values()))},
+                ),
+                "Fetched shader code for the selected stage.",
+            )
+
+        params = {"event_id": event_id, "stage": normalized_stage}
+        if normalized_target:
+            params["target"] = normalized_target
+
+        return self.context.run_tool(
+            capture_path,
+            "Fetched shader code for the selected stage.",
+            lambda normalized: self.context.capture_tool(normalized, "get_shader_code", params),
         )

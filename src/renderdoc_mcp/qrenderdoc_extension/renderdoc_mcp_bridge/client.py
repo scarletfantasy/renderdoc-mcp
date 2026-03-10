@@ -56,6 +56,30 @@ CONNECT_RETRY_SECONDS = 20.0
 _bridge = None
 
 
+def _shader_stage_from_name(stage_name):
+    normalized = str(stage_name or "").strip().lower()
+    for stage in _shader_stage_values():
+        if _enum_name(stage).lower() == normalized:
+            return stage
+    return None
+
+
+def _select_pipeline_object(state, stage_name):
+    graphics = state.GetGraphicsPipelineObject()
+    compute = state.GetComputePipelineObject()
+
+    if stage_name == "Compute" and _resource_id(compute):
+        return ("compute_pipeline_object", compute)
+
+    if _resource_id(graphics):
+        return ("graphics_pipeline_object", graphics)
+
+    if _resource_id(compute):
+        return ("compute_pipeline_object", compute)
+
+    return ("compute_pipeline_object" if stage_name == "Compute" else "graphics_pipeline_object", graphics)
+
+
 class BridgeClient(object):
     def __init__(self, ctx):
         self.ctx = ctx
@@ -371,6 +395,104 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return response
 
+    def _get_shader_code(self, event_id, stage_name, target):
+        self._ensure_capture_loaded()
+        action = self._set_event(event_id)
+        response = {"event_id": int(event_id)}
+
+        def callback(controller):
+            stage = _shader_stage_from_name(stage_name)
+            if stage is None:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "invalid_shader_stage",
+                            "message": "The supplied shader stage is not supported by this RenderDoc build.",
+                            "details": {
+                                "stage": stage_name,
+                                "supported_stages": [_enum_name(item) for item in _shader_stage_values()],
+                            },
+                        }
+                    )
+                )
+
+            state = controller.GetPipelineState()
+            shader_payload = _serialize_shader_stage(self.ctx, state, stage)
+            if shader_payload is None:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "shader_not_bound",
+                            "message": "No shader is bound at the supplied stage for the selected event.",
+                            "details": {"event_id": int(event_id), "stage": _enum_name(stage)},
+                        }
+                    )
+                )
+
+            targets = [str(item) for item in controller.GetDisassemblyTargets(True)]
+            if not targets:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "replay_failure",
+                            "message": "RenderDoc did not report any shader disassembly targets.",
+                            "details": {"event_id": int(event_id), "stage": shader_payload["stage"]},
+                        }
+                    )
+                )
+
+            selected_target = targets[0]
+            if target:
+                selected_target = next((item for item in targets if item.lower() == str(target).lower()), "")
+                if not selected_target:
+                    raise RuntimeError(
+                        json.dumps(
+                            {
+                                "code": "invalid_disassembly_target",
+                                "message": "The supplied disassembly target is not available for this capture.",
+                                "details": {
+                                    "target": target,
+                                    "available_targets": targets,
+                                    "event_id": int(event_id),
+                                    "stage": shader_payload["stage"],
+                                },
+                            }
+                        )
+                    )
+
+            reflection = state.GetShaderReflection(stage)
+            if reflection is None:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "replay_failure",
+                            "message": "RenderDoc did not return shader reflection for the selected stage.",
+                            "details": {"event_id": int(event_id), "stage": shader_payload["stage"]},
+                        }
+                    )
+                )
+
+            pipeline_object_kind, pipeline_object = _select_pipeline_object(state, shader_payload["stage"])
+            disassembly_text = str(controller.DisassembleShader(pipeline_object, reflection, selected_target) or "")
+
+            response["api"] = _api_name(controller)
+            response["action"] = {
+                "event_id": int(action.eventId),
+                "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
+                "flags": _action_flags(action),
+            }
+            response["shader"] = shader_payload
+            response["disassembly"] = {
+                "target": selected_target,
+                "available_targets": targets,
+                "pipeline_object_kind": pipeline_object_kind,
+                "pipeline_object_id": _resource_id(pipeline_object),
+                "text": disassembly_text,
+            }
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return response
+
     def _list_resources(self, kind, name_filter):
         self._ensure_capture_loaded()
         name_filter_lower = name_filter.lower() if name_filter else None
@@ -427,6 +549,12 @@ class BridgeClient(object):
             return self._get_action_details(int(params.get("event_id", 0)))
         if method == "get_pipeline_state":
             return self._get_pipeline_state(int(params.get("event_id", 0)))
+        if method == "get_shader_code":
+            return self._get_shader_code(
+                int(params.get("event_id", 0)),
+                params.get("stage", ""),
+                params.get("target"),
+            )
         if method == "list_resources":
             return self._list_resources(params.get("kind", "all"), params.get("name_filter"))
         if method == "close_capture":

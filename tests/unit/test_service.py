@@ -145,6 +145,29 @@ def test_invalid_event_id_string_returns_structured_error(tmp_path: Path) -> Non
     assert response["error"]["code"] == "replay_failure"
 
 
+def test_get_shader_code_normalizes_stage_and_target(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_shader_code(str(capture_path), event_id="42", stage=" ps ", target=" DXBC ")
+
+    assert response["error"] is None
+    assert bridge.calls == [("get_shader_code", {"event_id": 42, "stage": "Pixel", "target": "DXBC"})]
+
+
+def test_get_shader_code_rejects_unknown_stage(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.get_shader_code(str(capture_path), event_id=7, stage="bogus")
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
 def test_tool_wraps_domain_errors(tmp_path: Path) -> None:
     capture_path = tmp_path / "sample.rdc"
     capture_path.write_text("x", encoding="utf-8")

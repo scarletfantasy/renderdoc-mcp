@@ -112,6 +112,20 @@ def renderdoc_get_pipeline_state(capture_path: str, event_id: int) -> dict[str, 
 
 
 @app.tool(
+    name="renderdoc_get_shader_code",
+    description="Fetch shader disassembly text for a specific shader stage at a RenderDoc event_id.",
+    structured_output=True,
+)
+def renderdoc_get_shader_code(
+    capture_path: str,
+    event_id: int,
+    stage: str,
+    target: str | None = None,
+) -> dict[str, Any]:
+    return get_service().get_shader_code(capture_path, event_id, stage=stage, target=target)
+
+
+@app.tool(
     name="renderdoc_list_resources",
     description="List texture and buffer resources in a RenderDoc capture, with optional kind and name filtering.",
     structured_output=True,

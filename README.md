@@ -13,6 +13,7 @@ It launches `qrenderdoc.exe`, installs a small RenderDoc Python extension into `
 - `renderdoc_get_pass_details`
 - `renderdoc_get_action_details`
 - `renderdoc_get_pipeline_state`
+- `renderdoc_get_shader_code`
 - `renderdoc_list_resources`
 - `renderdoc://recent-captures`
 - `renderdoc://capture/{base64url_path}/summary`
@@ -21,7 +22,7 @@ It launches `qrenderdoc.exe`, installs a small RenderDoc Python extension into `
 
 `renderdoc-mcp` now exposes two layers of tooling:
 
-- Low-level primitives for action trees, event details, pipeline state, and resources.
+- Low-level primitives for action trees, event details, pipeline state, shader disassembly, and resources.
 - High-level frame analysis that groups the capture into top-level passes, ranks draw-heavy and compute-heavy hotspots, and highlights the tail UI/present chain.
 
 The pass classifier is intentionally engine-agnostic. It uses action structure, outputs, draw or dispatch counts, event boundaries, and naming hints when available. Naming hints are advisory only and low weight.
@@ -60,6 +61,14 @@ renderdoc_list_actions(capture_path="C:\\captures\\frame.rdc", cursor=0, limit=1
 ```
 
 Paged action results use a flat preorder list with `depth`, `parent_event_id`, `has_more`, and `next_cursor`.
+
+To fetch shader disassembly for a specific event and stage:
+
+```powershell
+renderdoc_get_shader_code(capture_path="C:\\captures\\frame.rdc", event_id=1234, stage="pixel")
+```
+
+The result includes the selected shader stage metadata, available disassembly targets reported by RenderDoc, and the disassembly text for the chosen target.
 
 ## Install
 

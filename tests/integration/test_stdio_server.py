@@ -48,6 +48,7 @@ def test_stdio_tools_and_resources() -> None:
                     "renderdoc_get_pass_details",
                     "renderdoc_get_action_details",
                     "renderdoc_get_pipeline_state",
+                    "renderdoc_get_shader_code",
                     "renderdoc_list_resources",
                 }.issubset(tool_names)
 
@@ -113,6 +114,43 @@ def test_stdio_tools_and_resources() -> None:
                 )
                 assert not pipeline.isError
                 assert pipeline.structuredContent["result"]["event_id"] == first_event
+
+                shader_probe_actions = await session.call_tool(
+                    "renderdoc_list_actions",
+                    {"capture_path": capture_path, "cursor": 0, "limit": 100},
+                )
+                assert not shader_probe_actions.isError
+
+                shader_event = None
+                shader_stage = None
+                for item in shader_probe_actions.structuredContent["result"]["actions"]:
+                    if not {"draw", "dispatch"}.intersection(item["flags"]):
+                        continue
+
+                    candidate = await session.call_tool(
+                        "renderdoc_get_pipeline_state",
+                        {"capture_path": capture_path, "event_id": item["event_id"]},
+                    )
+                    assert not candidate.isError
+                    shaders = candidate.structuredContent["result"]["pipeline"]["shaders"]
+                    if shaders:
+                        shader_event = item["event_id"]
+                        shader_stage = shaders[0]["stage"]
+                        break
+
+                if shader_event is not None and shader_stage is not None:
+                    shader_code = await session.call_tool(
+                        "renderdoc_get_shader_code",
+                        {
+                            "capture_path": capture_path,
+                            "event_id": shader_event,
+                            "stage": shader_stage,
+                        },
+                    )
+                    assert not shader_code.isError
+                    assert shader_code.structuredContent["result"]["event_id"] == shader_event
+                    assert shader_code.structuredContent["result"]["shader"]["stage"] == shader_stage
+                    assert shader_code.structuredContent["result"]["disassembly"]["text"]
 
                 resources = await session.call_tool(
                     "renderdoc_list_resources",

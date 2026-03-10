@@ -62,6 +62,15 @@ class RenderDocService:
     def get_pipeline_state(self, capture_path: str, event_id: int) -> dict[str, Any]:
         return self._actions.get_pipeline_state(capture_path, event_id)
 
+    def get_shader_code(
+        self,
+        capture_path: str,
+        event_id: int,
+        stage: str,
+        target: str | None = None,
+    ) -> dict[str, Any]:
+        return self._actions.get_shader_code(capture_path, event_id, stage=stage, target=target)
+
     def list_resources(self, capture_path: str, kind: str = "all", name_filter: str | None = None) -> dict[str, Any]:
         return self._resources.list_resources(capture_path, kind=kind, name_filter=name_filter)
 
