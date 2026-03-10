@@ -5,6 +5,7 @@ try:
         PageInfo,
         with_meta,
     )
+    from .pass_classification import action_summary, compact_action_entry
 except Exception:
     from models import (
         DEFAULT_ACTION_PAGE_LIMIT,
@@ -12,6 +13,7 @@ except Exception:
         PageInfo,
         with_meta,
     )
+    from pass_classification import action_summary, compact_action_entry
 
 
 def build_action_tree_result(nodes, total_count, max_depth=None, name_filter=None, limit=None):
@@ -79,6 +81,64 @@ def flatten_action_tree(nodes):
     flat = []
     _flatten_action_tree(nodes, flat)
     return flat
+
+
+def build_action_children_result(
+    analysis_cache,
+    parent_event_id=None,
+    cursor=None,
+    limit=None,
+    name_filter=None,
+    flags_filter=None,
+):
+    parent_key = "" if parent_event_id in (None, "") else str(int(parent_event_id))
+    child_ids = list(analysis_cache.get("action_children_index", {}).get(parent_key, []))
+    action_index = analysis_cache.get("action_index", {})
+    name_filter_lower = _lower(name_filter)
+    required_flags = {item for item in (_lower(flags_filter) or "").replace(",", " ").split() if item}
+
+    children = []
+    for event_id in child_ids:
+        node = action_index.get(int(event_id))
+        if node is None:
+            continue
+        entry = compact_action_entry(node)
+        if name_filter_lower and name_filter_lower not in entry["name"].lower():
+            continue
+        if required_flags and not required_flags.issubset(set(entry["flags"])):
+            continue
+        children.append(entry)
+
+    page_limit = int(limit if limit is not None else DEFAULT_ACTION_PAGE_LIMIT)
+    offset = int(cursor or 0)
+    page = children[offset : offset + page_limit]
+    next_offset = offset + len(page)
+    has_more = next_offset < len(children)
+
+    return with_meta(
+        {
+            "parent_event_id": parent_key,
+            "name_filter": name_filter or "",
+            "flags_filter": " ".join(sorted(required_flags)),
+            "actions": page,
+        },
+        page=PageInfo(
+            cursor=str(offset),
+            next_cursor=str(next_offset) if has_more else "",
+            limit=page_limit,
+            returned_count=len(page),
+            total_count=len(child_ids),
+            matched_count=len(children),
+            has_more=has_more,
+        ),
+    )
+
+
+def build_action_summary_result(analysis_cache, event_id):
+    node = analysis_cache.get("action_index", {}).get(int(event_id))
+    if node is None:
+        return None
+    return {"action": action_summary(node), "meta": {}}
 
 
 def _filter_action_tree(nodes, max_depth, name_filter_lower, depth):

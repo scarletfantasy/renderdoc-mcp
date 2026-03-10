@@ -49,16 +49,23 @@ _DEPTH_HINTS = ["prepass", "depth", "z pre", "hzb", "occlusion"]
 
 def build_frame_analysis(nodes, metadata):
     annotated_nodes = [_annotate_action_node(node, 0) for node in nodes]
+    action_index = {}
+    index_action_nodes(annotated_nodes, action_index)
+    action_children_index = {"": [int(node["event_id"]) for node in annotated_nodes]}
+    _index_action_children(annotated_nodes, action_children_index)
 
     top_level_passes = []
     pass_index = {}
     for node in annotated_nodes:
-        pass_payload = _build_pass_payload(node, 0, True, pass_index)
+        pass_payload = _build_pass_payload(node, 0, True, pass_index, "")
         if pass_payload is not None:
             top_level_passes.append(pass_payload)
 
     top_level_summaries = [pass_summary(pass_payload) for pass_payload in top_level_passes]
     all_passes = _flatten_pass_tree(top_level_passes)
+    root_pass_ids = [item["pass_id"] for item in top_level_passes]
+    pass_children_index = {"": list(root_pass_ids)}
+    _index_pass_children(top_level_passes, pass_children_index)
     warnings = build_analysis_warnings(all_passes)
 
     draw_rankings = sorted(
@@ -88,7 +95,13 @@ def build_frame_analysis(nodes, metadata):
         "analysis": public_analysis,
         "action_tree": annotated_nodes,
         "passes": top_level_passes,
+        "all_passes": all_passes,
         "pass_index": pass_index,
+        "pass_children_index": pass_children_index,
+        "root_pass_ids": root_pass_ids,
+        "action_index": action_index,
+        "action_children_index": action_children_index,
+        "root_action_ids": action_children_index[""],
         "statistics": metadata["statistics"],
         "resource_counts": metadata["resource_counts"],
         "frame": metadata["frame"],
@@ -102,6 +115,13 @@ def get_pass_details(analysis_cache, pass_id):
     return analysis_cache["pass_index"].get(pass_id)
 
 
+def get_pass_summary(analysis_cache, pass_id):
+    pass_payload = analysis_cache["pass_index"].get(pass_id)
+    if pass_payload is None:
+        return None
+    return pass_summary(pass_payload)
+
+
 def pass_id_from_range(start_event_id, end_event_id):
     return "pass:{0}-{1}".format(int(start_event_id), int(end_event_id))
 
@@ -109,6 +129,7 @@ def pass_id_from_range(start_event_id, end_event_id):
 def pass_summary(pass_payload):
     return {
         "pass_id": pass_payload["pass_id"],
+        "parent_pass_id": pass_payload.get("parent_pass_id", ""),
         "name": pass_payload["name"],
         "category": pass_payload["category"],
         "confidence": pass_payload["confidence"],
@@ -122,9 +143,28 @@ def pass_summary(pass_payload):
     }
 
 
+def pass_list_entry(pass_payload):
+    payload = {
+        "pass_id": pass_payload["pass_id"],
+        "parent_pass_id": pass_payload.get("parent_pass_id", ""),
+        "name": pass_payload["name"],
+        "category": pass_payload["category"],
+        "confidence": pass_payload["confidence"],
+        "event_range": dict(pass_payload["event_range"]),
+        "stats": dict(pass_payload["stats"]),
+        "child_pass_count": int(pass_payload["child_pass_count"]),
+    }
+    if "gpu_time_ms" in pass_payload:
+        payload["gpu_time_ms"] = pass_payload["gpu_time_ms"]
+    if "timed_event_count" in pass_payload:
+        payload["timed_event_count"] = int(pass_payload["timed_event_count"])
+    return payload
+
+
 def copy_pass_entry(item):
     payload = {
         "pass_id": item["pass_id"],
+        "parent_pass_id": item.get("parent_pass_id", ""),
         "name": item["name"],
         "category": item["category"],
         "confidence": item["confidence"],
@@ -192,6 +232,35 @@ def index_action_nodes(nodes, output):
     for node in nodes:
         output[int(node["event_id"])] = node
         index_action_nodes(node.get("children", []), output)
+
+
+def compact_action_entry(node):
+    analysis = node.get("_analysis", {})
+    return {
+        "event_id": int(node["event_id"]),
+        "name": node["name"],
+        "flags": list(node.get("flags", [])),
+        "depth": int(analysis.get("depth", node.get("depth", 0))),
+        "child_count": int(node.get("child_count", len(node.get("children", [])))),
+        "parent_event_id": node.get("parent_event_id"),
+    }
+
+
+def action_summary(node):
+    payload = compact_action_entry(node)
+    payload["num_indices"] = int(node.get("num_indices", 0))
+    payload["num_instances"] = int(node.get("num_instances", 1))
+    payload["dispatch_dimension"] = [int(value) for value in node.get("dispatch_dimension", [0, 0, 0])]
+    payload["dispatch_threads_dimension"] = [
+        int(value) for value in node.get("dispatch_threads_dimension", [0, 0, 0])
+    ]
+    payload["resource_usage_summary"] = {
+        "output_count": len(node.get("outputs", [])),
+        "has_depth_output": bool((node.get("depth_output") or {}).get("resource_id")),
+        "output_resources": _collect_resource_names(node.get("outputs", [])),
+        "depth_resource": (node.get("depth_output") or {}).get("resource_name") or "",
+    }
+    return payload
 
 
 def representative_event_copy(item):
@@ -273,20 +342,22 @@ def _annotate_action_node(node, depth):
     return annotated
 
 
-def _build_pass_payload(node, level, allow_non_marker_children, pass_index):
+def _build_pass_payload(node, level, allow_non_marker_children, pass_index, parent_pass_id):
     if not _is_pass_candidate(node, level, allow_non_marker_children):
         return None
 
     category, confidence, reasons = _classify_pass(node, level)
     child_passes = []
     for child in node["children"]:
-        child_pass = _build_pass_payload(child, level + 1, False, pass_index)
+        child_pass = _build_pass_payload(child, level + 1, False, pass_index, parent_pass_id="")
         if child_pass is not None:
             child_passes.append(child_pass)
 
     event_range = node["_analysis"]["event_range"]
+    pass_id = pass_id_from_range(event_range["start_event_id"], event_range["end_event_id"])
     payload = {
-        "pass_id": pass_id_from_range(event_range["start_event_id"], event_range["end_event_id"]),
+        "pass_id": pass_id,
+        "parent_pass_id": parent_pass_id,
         "name": node["name"],
         "category": category,
         "confidence": confidence,
@@ -299,6 +370,8 @@ def _build_pass_payload(node, level, allow_non_marker_children, pass_index):
         "child_pass_count": len(child_passes),
         "child_passes": child_passes,
     }
+    for child_pass in child_passes:
+        child_pass["parent_pass_id"] = pass_id
     pass_index[payload["pass_id"]] = payload
     return payload
 
@@ -405,6 +478,18 @@ def _flatten_pass_tree(passes):
         payload.append(pass_payload)
         payload.extend(_flatten_pass_tree(pass_payload["child_passes"]))
     return payload
+
+
+def _index_pass_children(passes, output):
+    for pass_payload in passes:
+        output[pass_payload["pass_id"]] = [child["pass_id"] for child in pass_payload.get("child_passes", [])]
+        _index_pass_children(pass_payload.get("child_passes", []), output)
+
+
+def _index_action_children(nodes, output):
+    for node in nodes:
+        output[str(int(node["event_id"]))] = [int(child["event_id"]) for child in node.get("children", [])]
+        _index_action_children(node.get("children", []), output)
 
 
 def _representative_event(node):

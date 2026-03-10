@@ -56,6 +56,12 @@ class FakeContext:
     def GetResourceName(self, resource_id):
         return str(resource_id)
 
+    def GetTextures(self):
+        return []
+
+    def GetBuffers(self):
+        return []
+
 
 class FakeState:
     def __init__(self, *, shader_bound: bool = False) -> None:
@@ -110,35 +116,64 @@ def test_qrenderdoc_bridge_records_renderdoc_version_from_hello() -> None:
     assert bridge.renderdoc_version == "1.43"
 
 
-def test_bridge_client_pipeline_state_gracefully_handles_missing_descriptor_access() -> None:
+def test_bridge_client_pipeline_overview_gracefully_handles_missing_descriptor_access() -> None:
     client = BridgeClient(FakeContext(FakeController()))
 
-    response = client._get_pipeline_state(7)
+    response = client._get_pipeline_overview(7)
 
     assert response["pipeline"]["available"] is True
-    assert response["pipeline"]["descriptor_accesses"] == []
+    assert response["pipeline"]["counts"]["descriptor_accesses"] == 0
     assert response["pipeline"]["graphics_pipeline_object"] == ""
 
 
-def test_bridge_client_api_pipeline_state_degrades_when_accessor_signature_changes() -> None:
+def test_bridge_client_pipeline_bindings_degrades_when_accessor_signature_changes() -> None:
     class BrokenController(FakeController):
         def GetD3D12PipelineState(self):
             raise TypeError("signature changed")
 
     client = BridgeClient(FakeContext(BrokenController(api_name="D3D12")))
 
-    response = client._get_api_pipeline_state(7)
+    response = client._list_pipeline_bindings(7, "api_details", 0, 50)
 
-    assert response["api_pipeline"]["available"] is False
-    assert "compatible D3D12 pipeline accessor" in response["api_pipeline"]["reason"]
+    assert response["items"][0]["available"] is False
+    assert "compatible D3D12 pipeline accessor" in response["items"][0]["reason"]
 
 
-def test_bridge_client_shader_code_returns_unavailable_when_disassembly_targets_missing(monkeypatch) -> None:
+def test_bridge_client_shader_summary_returns_unavailable_when_disassembly_targets_missing(monkeypatch) -> None:
     client = BridgeClient(FakeContext(FakeController(state=FakeState(shader_bound=True))))
     monkeypatch.setattr(bridge_client_module, "_shader_stage_from_name", lambda stage_name: "Pixel")
+    monkeypatch.setattr(bridge_client_module, "_shader_stage_values", lambda: ["Pixel"])
 
-    response = client._get_shader_code(7, "pixel", None)
+    response = client._get_shader_summary(7, "pixel")
 
     assert response["shader"]["stage"] == "Pixel"
     assert response["disassembly"]["available"] is False
     assert "did not report any shader disassembly targets" in response["disassembly"]["reason"]
+
+
+def test_bridge_client_shader_code_chunk_pages_cached_disassembly(monkeypatch) -> None:
+    client = BridgeClient(FakeContext(FakeController(state=FakeState(shader_bound=True))))
+    monkeypatch.setattr(
+        client,
+        "_get_shader_code",
+        lambda event_id, stage_name, target: {
+            "event_id": event_id,
+            "api": "D3D12",
+            "action": {"event_id": event_id},
+            "shader": {"stage": "Pixel", "shader_id": "shader-1", "shader_name": "MainPS"},
+            "disassembly": {
+                "available": True,
+                "reason": "",
+                "target": "dxil",
+                "available_targets": ["dxil"],
+                "text": "line1\nline2\nline3",
+            },
+        },
+    )
+
+    response = client._get_shader_code_chunk(7, "Pixel", None, 2, 2)
+
+    assert response["start_line"] == 2
+    assert response["returned_line_count"] == 2
+    assert response["has_more"] is False
+    assert response["text"] == "line2\nline3"

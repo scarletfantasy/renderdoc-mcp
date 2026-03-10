@@ -1,15 +1,33 @@
 try:
-    from .models import DEFAULT_PASS_PAGE_LIMIT, PageInfo, TimingInfo, with_meta
+    from .models import (
+        DEFAULT_PASS_PAGE_LIMIT,
+        DEFAULT_TIMING_EVENT_PAGE_LIMIT,
+        MAX_TIMING_EVENT_PAGE_LIMIT,
+        PageInfo,
+        TimingInfo,
+        with_meta,
+    )
     from .pass_classification import (
         copy_pass_entry,
+        get_pass_summary,
         index_action_nodes,
+        pass_list_entry,
         pass_summary,
     )
 except Exception:
-    from models import DEFAULT_PASS_PAGE_LIMIT, PageInfo, TimingInfo, with_meta
+    from models import (
+        DEFAULT_PASS_PAGE_LIMIT,
+        DEFAULT_TIMING_EVENT_PAGE_LIMIT,
+        MAX_TIMING_EVENT_PAGE_LIMIT,
+        PageInfo,
+        TimingInfo,
+        with_meta,
+    )
     from pass_classification import (
         copy_pass_entry,
+        get_pass_summary,
         index_action_nodes,
+        pass_list_entry,
         pass_summary,
     )
 
@@ -47,6 +65,7 @@ def build_analysis_result(
 
 def list_passes(
     analysis_cache,
+    parent_pass_id=None,
     cursor=None,
     limit=None,
     category_filter=None,
@@ -55,7 +74,10 @@ def list_passes(
     threshold_ms=None,
     timing_payload=None,
 ):
-    passes = analysis_cache["passes"]
+    parent_key = str(parent_pass_id or "")
+    pass_ids = list(analysis_cache.get("pass_children_index", {}).get(parent_key, []))
+    pass_index = analysis_cache.get("pass_index", {})
+    passes = [pass_index[pass_id] for pass_id in pass_ids if pass_id in pass_index]
     name_filter_lower = lower(name_filter)
     filtered_passes = []
 
@@ -88,7 +110,7 @@ def list_passes(
             if threshold_ms is not None:
                 warnings.append("threshold_ms was ignored because GPU timing is unavailable.")
     else:
-        filtered = [pass_summary(pass_payload) for pass_payload in filtered_passes]
+        filtered = [pass_list_entry(pass_payload) for pass_payload in filtered_passes]
         if sort_by == "draw_calls":
             filtered = sorted(
                 filtered,
@@ -121,6 +143,7 @@ def list_passes(
 
     return with_meta(
         {
+            "parent_pass_id": parent_key,
             "passes": page,
             "sort_by": sort_by or "event_order",
             "effective_sort_by": effective_sort_by,
@@ -134,11 +157,86 @@ def list_passes(
             next_cursor=str(next_offset) if has_more else "",
             limit=page_limit,
             returned_count=len(page),
-            total_count=len(passes),
+            total_count=len(pass_ids),
             matched_count=len(filtered),
             has_more=has_more,
         ),
         timing=timing_info if sort_by == "gpu_time" else None,
+    )
+
+
+def list_timing_events(
+    analysis_cache,
+    pass_id,
+    timing_payload,
+    cursor=None,
+    limit=None,
+    sort_by="event_order",
+):
+    pass_payload = analysis_cache["pass_index"].get(pass_id)
+    if pass_payload is None:
+        return None
+
+    normalized_timing = normalize_timing_payload(timing_payload)
+    timing_info = timing_info_from_payload(normalized_timing)
+    result = {
+        "pass": pass_list_entry(pass_payload),
+        "basis": "gpu_timing" if timing_info.timing_available else "unavailable",
+        "sort_by": sort_by or "event_order",
+        "effective_sort_by": sort_by or "event_order",
+        "total_gpu_time_ms": None,
+        "timed_event_count": 0,
+        "events": [],
+    }
+
+    if not timing_info.timing_available:
+        result["effective_sort_by"] = "event_order"
+        return with_meta(result, timing=timing_info)
+
+    action_index = analysis_cache.get("action_index")
+    if action_index is None:
+        action_index = {}
+        index_action_nodes(analysis_cache["action_tree"], action_index)
+    start_event_id = int(pass_payload["event_range"]["start_event_id"])
+    end_event_id = int(pass_payload["event_range"]["end_event_id"])
+    events = []
+    total_gpu_time_ms = 0.0
+
+    for item in normalized_timing.get("rows", []):
+        event_id = int(item["event_id"])
+        if event_id < start_event_id or event_id > end_event_id:
+            continue
+        event_entry = timed_event_entry(item, action_index.get(event_id))
+        events.append(event_entry)
+        total_gpu_time_ms += event_entry["gpu_time_ms"]
+
+    if sort_by == "gpu_time":
+        events = sorted(events, key=lambda item: (-item["gpu_time_ms"], item["event_id"]))
+    else:
+        result["effective_sort_by"] = "event_order"
+        events = sorted(events, key=lambda item: (item["event_id"], item["name"]))
+
+    page_limit = int(limit if limit is not None else DEFAULT_TIMING_EVENT_PAGE_LIMIT)
+    offset = int(cursor or 0)
+    page = events[offset : offset + page_limit]
+    next_offset = offset + len(page)
+    has_more = next_offset < len(events)
+
+    result["events"] = page
+    result["timed_event_count"] = len(events)
+    result["total_gpu_time_ms"] = round(total_gpu_time_ms, 6)
+    return with_meta(
+        result,
+        page=PageInfo(
+            cursor=str(offset),
+            next_cursor=str(next_offset) if has_more else "",
+            limit=page_limit,
+            returned_count=len(page),
+            total_count=len(events),
+            matched_count=len(events),
+            has_more=has_more,
+        ),
+        timing=timing_info,
     )
 
 
@@ -214,7 +312,7 @@ def timed_pass_summaries(pass_payloads, timing_payload):
     payload = []
 
     for pass_payload in pass_payloads:
-        summary = pass_summary(pass_payload)
+        summary = pass_list_entry(pass_payload)
         if not available:
             summary["gpu_time_ms"] = None
             summary["timed_event_count"] = 0

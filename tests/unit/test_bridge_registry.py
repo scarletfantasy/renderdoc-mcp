@@ -18,12 +18,13 @@ class FakeContext:
         return FakeExtensions()
 
 
-def test_bridge_client_registers_handler_registry() -> None:
+def test_bridge_client_registers_v2_handler_registry() -> None:
     client = BridgeClient(FakeContext())
 
     assert {
-        "get_action_tree",
-        "get_pipeline_state",
-        "get_api_pipeline_state",
+        "get_capture_overview",
+        "get_analysis_worklist",
+        "list_pipeline_bindings",
+        "get_shader_code_chunk",
         "close_capture",
     }.issubset(set(client.handlers))

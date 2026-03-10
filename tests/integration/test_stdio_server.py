@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import sys
 import tempfile
@@ -23,6 +24,10 @@ def _find_capture() -> str | None:
     return None
 
 
+def _size_bytes(payload: object) -> int:
+    return len(json.dumps(payload, ensure_ascii=False).encode("utf-8"))
+
+
 @pytest.mark.integration
 def test_stdio_tools_and_resources() -> None:
     capture_path = _find_capture()
@@ -30,10 +35,12 @@ def test_stdio_tools_and_resources() -> None:
         pytest.skip("No local .rdc capture was found for integration testing.")
 
     async def run_test() -> None:
+        env = os.environ.copy()
+        env.setdefault("RENDERDOC_BRIDGE_TIMEOUT_SECONDS", "180")
         params = StdioServerParameters(
             command=sys.executable,
             args=["-m", "renderdoc_mcp"],
-            env=os.environ.copy(),
+            env=env,
         )
 
         async with stdio_client(params) as streams:
@@ -44,19 +51,19 @@ def test_stdio_tools_and_resources() -> None:
                 assert {
                     "renderdoc_open_capture",
                     "renderdoc_close_capture",
-                    "renderdoc_get_capture_summary",
-                    "renderdoc_analyze_frame",
-                    "renderdoc_get_action_tree",
-                    "renderdoc_list_actions",
+                    "renderdoc_get_capture_overview",
+                    "renderdoc_get_analysis_worklist",
                     "renderdoc_list_passes",
-                    "renderdoc_get_pass_details",
-                    "renderdoc_get_timing_data",
-                    "renderdoc_get_performance_hotspots",
-                    "renderdoc_get_action_details",
-                    "renderdoc_get_pipeline_state",
-                    "renderdoc_get_api_pipeline_state",
-                    "renderdoc_get_shader_code",
+                    "renderdoc_get_pass_summary",
+                    "renderdoc_list_timing_events",
+                    "renderdoc_list_actions",
+                    "renderdoc_get_action_summary",
+                    "renderdoc_get_pipeline_overview",
+                    "renderdoc_list_pipeline_bindings",
+                    "renderdoc_get_shader_summary",
+                    "renderdoc_get_shader_code_chunk",
                     "renderdoc_list_resources",
+                    "renderdoc_get_resource_summary",
                     "renderdoc_get_pixel_history",
                     "renderdoc_debug_pixel",
                     "renderdoc_get_texture_data",
@@ -70,148 +77,158 @@ def test_stdio_tools_and_resources() -> None:
                 assert opened_payload is not None
                 capture_id = opened_payload["capture_id"]
 
-                summary = await session.call_tool("renderdoc_get_capture_summary", {"capture_id": capture_id})
-                assert not summary.isError
-                assert summary.structuredContent["capture_id"] == capture_id
+                overview = await session.call_tool("renderdoc_get_capture_overview", {"capture_id": capture_id})
+                assert not overview.isError
+                overview_payload = overview.structuredContent
+                assert overview_payload["capture_id"] == capture_id
+                assert "capabilities" in overview_payload
 
-                action_tree = await session.call_tool(
-                    "renderdoc_get_action_tree",
-                    {"capture_id": capture_id, "max_depth": 1},
+                worklist = await session.call_tool(
+                    "renderdoc_get_analysis_worklist",
+                    {"capture_id": capture_id, "focus": "performance", "limit": 10},
                 )
-                assert not action_tree.isError
-                assert "page" in action_tree.structuredContent["meta"]
+                assert not worklist.isError
+                assert worklist.structuredContent["count"] <= 10
 
-                paged_actions = await session.call_tool(
-                    "renderdoc_list_actions",
-                    {"capture_id": capture_id, "cursor": 0, "limit": 25},
-                )
-                assert not paged_actions.isError
-                assert paged_actions.structuredContent["meta"]["page"]["limit"] == 25
-                flat_actions = paged_actions.structuredContent["actions"]
-                assert flat_actions is not None
-
-                analysis = await session.call_tool("renderdoc_analyze_frame", {"capture_id": capture_id})
-                assert not analysis.isError
-                analysis_payload = analysis.structuredContent
-                assert analysis_payload["capture_id"] == capture_id
-                assert "meta" in analysis_payload
-
-                timed_analysis = await session.call_tool(
-                    "renderdoc_analyze_frame",
-                    {"capture_id": capture_id, "include_timing_summary": True},
-                )
-                assert not timed_analysis.isError
-                assert "timing" in timed_analysis.structuredContent["meta"]
-
-                listed_passes = await session.call_tool(
+                root_passes = await session.call_tool(
                     "renderdoc_list_passes",
-                    {"capture_id": capture_id, "limit": 10},
+                    {"capture_id": capture_id, "cursor": 0, "limit": 50},
                 )
-                assert not listed_passes.isError
-                assert listed_passes.structuredContent["meta"]["page"]["returned_count"] > 0
-                first_pass_id = listed_passes.structuredContent["passes"][0]["pass_id"]
+                assert not root_passes.isError
+                assert root_passes.structuredContent["meta"]["page"]["limit"] == 50
+                assert _size_bytes(root_passes.structuredContent) < 25 * 1024
+                root_pass_rows = root_passes.structuredContent["passes"]
+                assert root_pass_rows is not None
 
-                timed_passes = await session.call_tool(
-                    "renderdoc_list_passes",
-                    {"capture_id": capture_id, "limit": 10, "sort_by": "gpu_time"},
-                )
-                assert not timed_passes.isError
-                assert timed_passes.structuredContent["effective_sort_by"] in {"gpu_time", "event_order"}
-
-                pass_details = await session.call_tool(
-                    "renderdoc_get_pass_details",
-                    {"capture_id": capture_id, "pass_id": first_pass_id},
-                )
-                assert not pass_details.isError
-                assert pass_details.structuredContent["pass_id"] == first_pass_id
-
-                timing = await session.call_tool(
-                    "renderdoc_get_timing_data",
-                    {"capture_id": capture_id, "pass_id": first_pass_id},
-                )
-                assert not timing.isError
-                assert timing.structuredContent["pass"]["pass_id"] == first_pass_id
-
-                hotspots = await session.call_tool(
-                    "renderdoc_get_performance_hotspots",
-                    {"capture_id": capture_id},
-                )
-                assert not hotspots.isError
-                assert "timing" in hotspots.structuredContent["meta"]
-
-                first_event = flat_actions[0]["event_id"]
-                details = await session.call_tool(
-                    "renderdoc_get_action_details",
-                    {"capture_id": capture_id, "event_id": first_event},
-                )
-                assert not details.isError
-                assert details.structuredContent["action"]["event_id"] == first_event
-
-                pipeline = await session.call_tool(
-                    "renderdoc_get_pipeline_state",
-                    {"capture_id": capture_id, "event_id": first_event},
-                )
-                assert not pipeline.isError
-                assert pipeline.structuredContent["event_id"] == first_event
-
-                api_pipeline = await session.call_tool(
-                    "renderdoc_get_api_pipeline_state",
-                    {"capture_id": capture_id, "event_id": first_event},
-                )
-                assert not api_pipeline.isError
-                assert "api_pipeline" in api_pipeline.structuredContent
-
-                shader_probe = await session.call_tool(
-                    "renderdoc_list_actions",
-                    {"capture_id": capture_id, "cursor": 0, "limit": 100},
-                )
-                assert not shader_probe.isError
-
-                shader_event = None
-                shader_stage = None
-                for item in shader_probe.structuredContent["actions"]:
-                    if not {"draw", "dispatch"}.intersection(item["flags"]):
-                        continue
-                    candidate = await session.call_tool(
-                        "renderdoc_get_pipeline_state",
-                        {"capture_id": capture_id, "event_id": item["event_id"]},
+                chosen_pass = root_pass_rows[0] if root_pass_rows else None
+                child_pass_rows = []
+                if chosen_pass is not None and chosen_pass["child_pass_count"] > 0:
+                    child_passes = await session.call_tool(
+                        "renderdoc_list_passes",
+                        {"capture_id": capture_id, "parent_pass_id": chosen_pass["pass_id"], "limit": 50},
                     )
-                    assert not candidate.isError
-                    shaders = candidate.structuredContent["pipeline"]["shaders"]
-                    if shaders:
-                        shader_event = item["event_id"]
-                        shader_stage = shaders[0]["stage"]
-                        break
+                    assert not child_passes.isError
+                    child_pass_rows = child_passes.structuredContent["passes"]
+                    if child_pass_rows:
+                        chosen_pass = child_pass_rows[0]
 
-                if shader_event is not None and shader_stage is not None:
-                    shader_code = await session.call_tool(
-                        "renderdoc_get_shader_code",
+                if chosen_pass is not None:
+                    pass_summary = await session.call_tool(
+                        "renderdoc_get_pass_summary",
+                        {"capture_id": capture_id, "pass_id": chosen_pass["pass_id"]},
+                    )
+                    assert not pass_summary.isError
+                    assert "child_passes" not in pass_summary.structuredContent
+                    assert _size_bytes(pass_summary.structuredContent) < 10 * 1024
+
+                    timing = await session.call_tool(
+                        "renderdoc_list_timing_events",
+                        {"capture_id": capture_id, "pass_id": chosen_pass["pass_id"], "limit": 100},
+                    )
+                    assert not timing.isError
+                    assert timing.structuredContent["meta"]["page"]["limit"] == 100
+                    assert _size_bytes(timing.structuredContent) < 30 * 1024
+
+                root_actions = await session.call_tool(
+                    "renderdoc_list_actions",
+                    {"capture_id": capture_id, "cursor": 0, "limit": 50},
+                )
+                assert not root_actions.isError
+                root_action_rows = root_actions.structuredContent["actions"]
+                assert root_actions.structuredContent["meta"]["page"]["limit"] == 50
+
+                chosen_event = None
+                if root_action_rows:
+                    first_action = root_action_rows[0]
+                    if first_action["child_count"] > 0:
+                        child_actions = await session.call_tool(
+                            "renderdoc_list_actions",
+                            {"capture_id": capture_id, "parent_event_id": first_action["event_id"], "limit": 50},
+                        )
+                        assert not child_actions.isError
+                        for item in child_actions.structuredContent["actions"]:
+                            if set(item["flags"]).intersection({"draw", "dispatch"}):
+                                chosen_event = item["event_id"]
+                                break
+                    if chosen_event is None:
+                        probe_actions = await session.call_tool(
+                            "renderdoc_list_actions",
+                            {"capture_id": capture_id, "limit": 200, "flags_filter": "draw"},
+                        )
+                        assert not probe_actions.isError
+                        for item in probe_actions.structuredContent["actions"]:
+                            if "draw" in item["flags"] or "dispatch" in item["flags"]:
+                                chosen_event = item["event_id"]
+                                break
+
+                if chosen_event is not None:
+                    action_summary = await session.call_tool(
+                        "renderdoc_get_action_summary",
+                        {"capture_id": capture_id, "event_id": chosen_event},
+                    )
+                    assert not action_summary.isError
+                    assert action_summary.structuredContent["action"]["event_id"] == chosen_event
+
+                    pipeline = await session.call_tool(
+                        "renderdoc_get_pipeline_overview",
+                        {"capture_id": capture_id, "event_id": chosen_event},
+                    )
+                    assert not pipeline.isError
+                    assert _size_bytes(pipeline.structuredContent) < 12 * 1024
+
+                    descriptor_bindings = await session.call_tool(
+                        "renderdoc_list_pipeline_bindings",
                         {
                             "capture_id": capture_id,
-                            "event_id": shader_event,
-                            "stage": shader_stage,
+                            "event_id": chosen_event,
+                            "binding_kind": "descriptor_accesses",
+                            "limit": 50,
                         },
                     )
-                    assert not shader_code.isError
-                    assert shader_code.structuredContent["shader"]["stage"] == shader_stage
+                    assert not descriptor_bindings.isError
+
+                    shaders = pipeline.structuredContent["pipeline"]["shaders"]
+                    if shaders:
+                        stage = shaders[0]["stage"]
+                        shader_summary = await session.call_tool(
+                            "renderdoc_get_shader_summary",
+                            {"capture_id": capture_id, "event_id": chosen_event, "stage": stage},
+                        )
+                        assert not shader_summary.isError
+                        assert "text" not in shader_summary.structuredContent.get("shader", {})
+
+                        shader_chunk = await session.call_tool(
+                            "renderdoc_get_shader_code_chunk",
+                            {
+                                "capture_id": capture_id,
+                                "event_id": chosen_event,
+                                "stage": stage,
+                                "start_line": 1,
+                                "line_count": 200,
+                            },
+                        )
+                        assert not shader_chunk.isError
+                        assert _size_bytes(shader_chunk.structuredContent) < 40 * 1024
 
                 resources = await session.call_tool(
                     "renderdoc_list_resources",
-                    {"capture_id": capture_id, "kind": "all"},
+                    {"capture_id": capture_id, "kind": "all", "limit": 50},
                 )
                 assert not resources.isError
-                textures = resources.structuredContent["textures"]
-                buffers = resources.structuredContent["buffers"]
+                assert resources.structuredContent["meta"]["page"]["limit"] == 50
+                assert _size_bytes(resources.structuredContent) < 40 * 1024
+                items = resources.structuredContent["items"]
 
-                first_texture = next(
-                    (
-                        item
-                        for item in textures
-                        if item["resource_id"] and item["width"] > 0 and item["height"] > 0
-                    ),
-                    None,
-                )
+                first_texture = next((item for item in items if item["kind"] == "texture"), None)
+                first_buffer = next((item for item in items if item["kind"] == "buffer"), None)
+
                 if first_texture is not None:
+                    resource_summary = await session.call_tool(
+                        "renderdoc_get_resource_summary",
+                        {"capture_id": capture_id, "resource_id": first_texture["resource_id"]},
+                    )
+                    assert not resource_summary.isError
+
                     pixel_history = await session.call_tool(
                         "renderdoc_get_pixel_history",
                         {
@@ -219,6 +236,7 @@ def test_stdio_tools_and_resources() -> None:
                             "texture_id": first_texture["resource_id"],
                             "x": 0,
                             "y": 0,
+                            "limit": 100,
                         },
                     )
                     assert not pixel_history.isError
@@ -242,8 +260,8 @@ def test_stdio_tools_and_resources() -> None:
                             "mip_level": 0,
                             "x": 0,
                             "y": 0,
-                            "width": min(4, first_texture["width"]),
-                            "height": min(4, first_texture["height"]),
+                            "width": min(4, max(1, first_texture["width"])),
+                            "height": min(4, max(1, first_texture["height"])),
                         },
                     )
                     assert not texture_preview.isError
@@ -261,39 +279,37 @@ def test_stdio_tools_and_resources() -> None:
                         assert not saved_texture.isError
                         assert Path(output_path).is_file()
 
-                first_buffer = next((item for item in buffers if item["resource_id"] and item["byte_size"] > 0), None)
                 if first_buffer is not None:
-                    buffer_size = min(32, first_buffer["byte_size"])
                     buffer_data = await session.call_tool(
                         "renderdoc_get_buffer_data",
                         {
                             "capture_id": capture_id,
                             "buffer_id": first_buffer["resource_id"],
                             "offset": 0,
-                            "size": buffer_size,
                         },
                     )
                     assert not buffer_data.isError
-                    assert buffer_data.structuredContent["buffer"]["resource_id"] == first_buffer["resource_id"]
+                    assert buffer_data.structuredContent["encoding"] == "hex"
+                    assert "data" in buffer_data.structuredContent
 
                 resource_contents = await session.read_resource("renderdoc://recent-captures")
                 assert resource_contents.contents
 
-                capture_resource = await session.read_resource("renderdoc://capture/{}/summary".format(capture_id))
+                capture_resource = await session.read_resource("renderdoc://capture/{}/overview".format(capture_id))
                 assert capture_resource.contents
 
-                invalid_capture = await session.call_tool("renderdoc_get_capture_summary", {"capture_id": "deadbeef"})
+                invalid_capture = await session.call_tool("renderdoc_get_capture_overview", {"capture_id": "deadbeef"})
                 assert invalid_capture.isError
 
                 invalid_event = await session.call_tool(
-                    "renderdoc_get_action_details",
+                    "renderdoc_get_action_summary",
                     {"capture_id": capture_id, "event_id": 999999999},
                 )
                 assert invalid_event.isError
 
                 closed = await session.call_tool("renderdoc_close_capture", {"capture_id": capture_id})
                 assert not closed.isError
-                after_close = await session.call_tool("renderdoc_get_capture_summary", {"capture_id": capture_id})
+                after_close = await session.call_tool("renderdoc_get_capture_overview", {"capture_id": capture_id})
                 assert after_close.isError
 
     anyio.run(run_test)

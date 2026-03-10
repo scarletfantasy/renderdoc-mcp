@@ -72,189 +72,147 @@ def _metadata(nodes: list[dict]) -> dict:
     }
 
 
-def test_build_frame_analysis_classifies_common_pass_shapes() -> None:
+def test_build_frame_analysis_indexes_nested_passes_and_actions() -> None:
     nodes = [
         _action(
             10,
-            "Shadow Map Atlas",
-            ["push_marker"],
-            children=[_action(11, "Draw", ["draw"], depth_output=_resource("ShadowDepth"))],
-        ),
-        _action(
-            20,
-            "Depth PrePass",
-            ["push_marker"],
-            children=[_action(21, "Draw", ["draw"], depth_output=_resource("SceneDepth"))],
-        ),
-        _action(
-            30,
-            "BasePass",
+            "Scene",
             ["push_marker"],
             children=[
                 _action(
-                    31,
-                    "Draw",
-                    ["draw"],
-                    outputs=[_resource("GBufferA"), _resource("GBufferB")],
-                    depth_output=_resource("SceneDepth"),
+                    20,
+                    "BasePass",
+                    ["push_marker"],
+                    children=[
+                        _action(
+                            21,
+                            "Draw",
+                            ["draw"],
+                            outputs=[_resource("GBufferA"), _resource("GBufferB")],
+                            depth_output=_resource("SceneDepth"),
+                        )
+                    ],
                 )
             ],
         ),
-        _action(
-            40,
-            "Light Culling",
-            ["push_marker"],
-            children=[_action(41, "Dispatch", ["dispatch"])],
-        ),
-        _action(
-            50,
-            "Resolve History",
-            ["push_marker"],
-            children=[_action(51, "Resolve", ["resolve"])],
-        ),
-        _action(
-            60,
-            "SlateUI",
-            ["push_marker"],
-            children=[_action(61, "Draw", ["draw"], outputs=[_resource("Backbuffer")])],
-        ),
-        _action(70, "Present(Backbuffer)", []),
+        _action(30, "Present(Backbuffer)", []),
     ]
 
     analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
-    categories = {item["name"]: item["category"] for item in analysis["analysis"]["passes"]}
 
-    assert categories["Shadow Map Atlas"] == "shadow_depth"
-    assert categories["Depth PrePass"] == "depth_prepass"
-    assert categories["BasePass"] == "geometry"
-    assert categories["Light Culling"] == "lighting"
-    assert categories["Resolve History"] == "copy_resolve"
-    assert categories["SlateUI"] == "ui_overlay"
-    assert categories["Present(Backbuffer)"] == "presentation"
+    assert analysis["root_pass_ids"] == ["pass:10-21", "pass:30-30"]
+    assert analysis["pass_children_index"]["pass:10-21"] == ["pass:20-21"]
+    assert analysis["action_children_index"][""] == [10, 30]
+    assert analysis["action_children_index"]["10"] == [20]
 
 
-def test_action_tree_and_flat_list_have_distinct_contracts() -> None:
-    nodes = [_action(event_id, "Event {0}".format(event_id), ["draw"]) for event_id in range(1, 506)]
+def test_list_passes_can_drill_into_parent_pass_id() -> None:
+    nodes = [
+        _action(
+            10,
+            "Scene",
+            ["push_marker"],
+            children=[
+                _action(20, "ShadowDepths", ["push_marker"], children=[_action(21, "Draw", ["draw"])]),
+                _action(
+                    30,
+                    "BasePass",
+                    ["push_marker"],
+                    children=[_action(31, "Draw", ["draw"], outputs=[_resource("Color")])],
+                ),
+            ],
+        )
+    ]
 
-    tree = frame_analysis.build_action_tree_result(nodes, total_count=505)
-    page = frame_analysis.build_action_list_result(nodes, total_count=505, cursor=500, limit=3)
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    root = frame_analysis.list_passes(analysis, limit=50)
+    scene_children = frame_analysis.list_passes(analysis, parent_pass_id="pass:10-31", limit=50)
 
-    assert tree["meta"]["page_mode"] == "tree_preview"
-    assert tree["meta"]["page"]["returned_count"] == 500
-    assert tree["meta"]["page"]["has_more"] is True
-    assert page["meta"]["page_mode"] == "flat_preorder"
-    assert page["meta"]["page"]["returned_count"] == 3
-    assert [item["event_id"] for item in page["actions"]] == [501, 502, 503]
+    assert [item["name"] for item in root["passes"]] == ["Scene"]
+    assert {item["name"] for item in scene_children["passes"]} == {"ShadowDepths", "BasePass"}
 
 
-def test_list_passes_uses_meta_page_and_timing_contract() -> None:
+def test_list_actions_returns_direct_children_only() -> None:
+    nodes = [
+        _action(
+            10,
+            "Scene",
+            ["push_marker"],
+            children=[
+                _action(20, "Compute", ["dispatch"]),
+                _action(30, "BasePass", ["push_marker"], children=[_action(31, "Draw", ["draw"])]),
+            ],
+        )
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    root = frame_analysis.build_action_children_result(analysis, limit=50)
+    scene_children = frame_analysis.build_action_children_result(analysis, parent_event_id=10, flags_filter="push_marker")
+
+    assert [item["event_id"] for item in root["actions"]] == [10]
+    assert [item["event_id"] for item in scene_children["actions"]] == [30]
+
+
+def test_list_timing_events_pages_gpu_rows() -> None:
     nodes = [
         _action(
             100,
             "BasePass",
             ["push_marker"],
             children=[
-                _action(101, "Depth", ["draw"], num_indices=120),
-                _action(102, "Color", ["draw"], num_indices=240),
+                _action(101, "Depth", ["draw"]),
+                _action(102, "Color", ["draw"]),
+                _action(103, "Light", ["draw"]),
             ],
-        ),
-        _action(
-            200,
-            "Lighting",
-            ["push_marker"],
-            children=[_action(201, "Dispatch", ["dispatch"], dispatch_dimension=[8, 8, 1])],
-        ),
+        )
     ]
 
     analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
-    result = frame_analysis.list_passes(
+    result = frame_analysis.list_timing_events(
         analysis,
-        sort_by="gpu_time",
-        threshold_ms=1.0,
-        timing_payload={
+        "pass:100-103",
+        {
             "timing_available": True,
             "counter_name": "EventGPUDuration",
             "rows": [
                 {"event_id": 101, "gpu_time_ms": 0.5},
                 {"event_id": 102, "gpu_time_ms": 1.25},
-                {"event_id": 201, "gpu_time_ms": 0.75},
+                {"event_id": 103, "gpu_time_ms": 0.75},
             ],
         },
+        cursor=0,
+        limit=2,
+        sort_by="gpu_time",
     )
 
-    assert result["sort_by"] == "gpu_time"
-    assert result["effective_sort_by"] == "gpu_time"
-    assert result["meta"]["timing"]["timing_available"] is True
-    assert result["meta"]["page"]["matched_count"] == 1
-    assert result["passes"][0]["name"] == "BasePass"
-    assert result["passes"][0]["gpu_time_ms"] == 1.75
+    assert result["basis"] == "gpu_timing"
+    assert result["meta"]["page"]["returned_count"] == 2
+    assert result["events"][0]["event_id"] == 102
+    assert result["total_gpu_time_ms"] == 2.5
 
 
-def test_build_analysis_result_moves_warnings_and_timing_into_meta() -> None:
+def test_build_performance_hotspots_uses_nested_passes() -> None:
     nodes = [
         _action(
-            100,
-            "BasePass",
+            10,
+            "Scene",
             ["push_marker"],
-            children=[_action(101, "Depth", ["draw"]), _action(102, "Color", ["draw"])],
-        ),
-        _action(200, "Present", []),
+            children=[
+                _action(
+                    20,
+                    "BasePass",
+                    ["push_marker"],
+                    children=[_action(21, "Draw", ["draw"], num_indices=1000)],
+                )
+            ],
+        )
     ]
 
     analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
-    result = frame_analysis.build_analysis_result(
-        analysis,
-        include_timing_summary=True,
-        timing_payload={
-            "timing_available": True,
-            "counter_name": "EventGPUDuration",
-            "rows": [
-                {"event_id": 101, "gpu_time_ms": 0.25},
-                {"event_id": 102, "gpu_time_ms": 0.75},
-            ],
-        },
-    )
-
-    assert "warnings" not in result
-    assert result["meta"]["timing"]["timing_available"] is True
-    assert isinstance(result["meta"].get("warnings", []), list)
-    assert result["passes"][0]["gpu_time_ms"] == 1.0
-
-
-def test_build_timing_result_and_hotspots_use_meta_timing() -> None:
-    nodes = [
-        _action(
-            100,
-            "BasePass",
-            ["push_marker"],
-            children=[_action(101, "Depth", ["draw"]), _action(102, "Color", ["draw"])],
-        ),
-        _action(
-            200,
-            "Compute",
-            ["push_marker"],
-            children=[_action(201, "Dispatch", ["dispatch"], dispatch_threads_dimension=[4, 4, 4])],
-        ),
-    ]
-
-    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
-    timing = frame_analysis.build_timing_result(
-        analysis,
-        "pass:100-102",
-        {
-            "timing_available": False,
-            "counter_name": "EventGPUDuration",
-            "rows": [],
-            "reason": "unsupported",
-        },
-    )
     hotspots = frame_analysis.build_performance_hotspots(
         analysis,
         {"timing_available": False, "counter_name": "EventGPUDuration", "rows": [], "reason": "unsupported"},
     )
 
-    assert timing is not None
-    assert timing["basis"] == "unavailable"
-    assert timing["meta"]["timing"]["timing_unavailable_reason"] == "unsupported"
     assert hotspots["basis"] == "heuristic"
-    assert hotspots["meta"]["timing"]["timing_available"] is False
+    assert hotspots["top_passes"][0]["name"] == "BasePass"

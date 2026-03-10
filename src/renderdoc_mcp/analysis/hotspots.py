@@ -18,6 +18,7 @@ def build_performance_hotspots(
     index_action_nodes(analysis_cache["action_tree"], action_index)
     normalized_timing = normalize_timing_payload(timing_payload)
     timing_info = timing_info_from_payload(normalized_timing)
+    candidate_passes = _hotspot_pass_candidates(analysis_cache)
 
     result = {
         "basis": "gpu_timing" if timing_info.timing_available else "heuristic",
@@ -27,7 +28,7 @@ def build_performance_hotspots(
 
     if timing_info.timing_available:
         pass_rankings = []
-        for pass_payload in analysis_cache["passes"]:
+        for pass_payload in candidate_passes:
             start_event_id = int(pass_payload["event_range"]["start_event_id"])
             end_event_id = int(pass_payload["event_range"]["end_event_id"])
             rows = [
@@ -66,7 +67,7 @@ def build_performance_hotspots(
         "GPU duration counters are unavailable, so hotspots were ranked with draw, dispatch, copy, and clear heuristics.",
     )
     result["top_passes"] = sorted(
-        [_heuristic_pass_entry(item) for item in analysis_cache["passes"]],
+        [_heuristic_pass_entry(item) for item in candidate_passes],
         key=lambda item: (-item["heuristic_score"], item["event_range"]["start_event_id"]),
     )[:limit]
     result["top_events"] = sorted(
@@ -148,3 +149,9 @@ def _positive_product(values):
         payload *= integer
         saw_value = True
     return payload if saw_value else 0
+
+
+def _hotspot_pass_candidates(analysis_cache):
+    all_passes = list(analysis_cache.get("all_passes", analysis_cache["passes"]))
+    leaf_passes = [item for item in all_passes if int(item.get("child_pass_count", 0)) == 0]
+    return leaf_passes or all_passes

@@ -245,45 +245,67 @@ class BridgeClient(object):
         self.thread = None
         self.analysis_cache = frame_analysis.AnalysisCache()
         self.timing_cache = frame_analysis.AnalysisCache()
+        self.shader_code_cache = {}
         self.handlers = self._build_handlers()
 
     def _build_handlers(self):
         return {
             "load_capture": lambda params: self._load_capture(params.get("capture_path", "")),
             "get_capture_status": lambda params: self._capture_status(),
-            "get_capture_summary": lambda params: self._get_capture_summary(),
-            "get_action_tree": lambda params: self._get_action_tree(
-                params.get("max_depth"),
-                params.get("name_filter"),
-                params.get("limit"),
+            "get_capture_overview": lambda params: self._get_capture_overview(),
+            "get_analysis_worklist": lambda params: self._get_analysis_worklist(
+                params.get("focus", "performance"),
+                params.get("limit", 10),
             ),
             "list_actions": lambda params: self._list_actions(
-                params.get("max_depth"),
+                params.get("parent_event_id"),
                 params.get("name_filter"),
+                params.get("flags_filter"),
                 params.get("cursor"),
                 params.get("limit"),
             ),
-            "analyze_frame": lambda params: self._analyze_frame(bool(params.get("include_timing_summary", False))),
             "list_passes": lambda params: self._list_passes(
+                params.get("parent_pass_id"),
                 params.get("cursor"),
                 params.get("limit"),
                 params.get("category_filter"),
                 params.get("name_filter"),
                 params.get("sort_by", "event_order"),
-                params.get("threshold_ms"),
             ),
-            "get_pass_details": lambda params: self._get_pass_details(params.get("pass_id", "")),
-            "get_timing_data": lambda params: self._get_timing_data(params.get("pass_id", "")),
-            "get_performance_hotspots": lambda params: self._get_performance_hotspots(),
-            "get_action_details": lambda params: self._get_action_details(int(params.get("event_id", 0))),
-            "get_pipeline_state": lambda params: self._get_pipeline_state(int(params.get("event_id", 0))),
-            "get_api_pipeline_state": lambda params: self._get_api_pipeline_state(int(params.get("event_id", 0))),
-            "get_shader_code": lambda params: self._get_shader_code(
+            "get_pass_summary": lambda params: self._get_pass_summary(params.get("pass_id", "")),
+            "list_timing_events": lambda params: self._list_timing_events(
+                params.get("pass_id", ""),
+                params.get("cursor"),
+                params.get("limit"),
+                params.get("sort_by", "event_order"),
+            ),
+            "get_action_summary": lambda params: self._get_action_summary(int(params.get("event_id", 0))),
+            "get_pipeline_overview": lambda params: self._get_pipeline_overview(int(params.get("event_id", 0))),
+            "list_pipeline_bindings": lambda params: self._list_pipeline_bindings(
+                int(params.get("event_id", 0)),
+                params.get("binding_kind", ""),
+                params.get("cursor"),
+                params.get("limit"),
+            ),
+            "get_shader_summary": lambda params: self._get_shader_summary(
+                int(params.get("event_id", 0)),
+                params.get("stage", ""),
+            ),
+            "get_shader_code_chunk": lambda params: self._get_shader_code_chunk(
                 int(params.get("event_id", 0)),
                 params.get("stage", ""),
                 params.get("target"),
+                params.get("start_line", 1),
+                params.get("line_count", 200),
             ),
-            "list_resources": lambda params: self._list_resources(params.get("kind", "all"), params.get("name_filter")),
+            "list_resources": lambda params: self._list_resources(
+                params.get("kind", "all"),
+                params.get("cursor"),
+                params.get("limit"),
+                params.get("name_filter"),
+                params.get("sort_by", "name"),
+            ),
+            "get_resource_summary": lambda params: self._get_resource_summary(params.get("resource_id", "")),
             "get_pixel_history": lambda params: self._get_pixel_history(
                 params.get("texture_id", ""),
                 int(params.get("x", 0)),
@@ -291,6 +313,8 @@ class BridgeClient(object):
                 int(params.get("mip_level", 0)),
                 int(params.get("array_slice", 0)),
                 int(params.get("sample", 0)),
+                params.get("cursor"),
+                params.get("limit"),
             ),
             "debug_pixel": lambda params: self._debug_pixel(
                 params.get("texture_id", ""),
@@ -314,6 +338,7 @@ class BridgeClient(object):
                 params.get("buffer_id", ""),
                 int(params.get("offset", 0)),
                 int(params.get("size", 0)),
+                params.get("encoding", "hex"),
             ),
             "save_texture_to_file": lambda params: self._save_texture_to_file(
                 params.get("texture_id", ""),
@@ -378,6 +403,7 @@ class BridgeClient(object):
             self.sock = None
         self.analysis_cache.clear()
         self.timing_cache.clear()
+        self.shader_code_cache.clear()
 
     def _send(self, message):
         self.sock.send_text(json.dumps(message, separators=(",", ":")) + "\n")
@@ -439,6 +465,7 @@ class BridgeClient(object):
     def _clear_analysis_cache(self):
         self.analysis_cache.clear()
         self.timing_cache.clear()
+        self.shader_code_cache.clear()
 
     def _capture_cache_key(self):
         capture_path = self.ctx.GetCaptureFilename()
@@ -532,6 +559,120 @@ class BridgeClient(object):
                 }
             )
         )
+
+    def _compact_texture(self, texture):
+        payload = _serialize_texture(self.ctx, texture)
+        return {
+            "kind": "texture",
+            "resource_id": payload["resource_id"],
+            "name": payload["name"],
+            "format": {
+                "comp_count": int(payload["format"]["comp_count"]),
+                "comp_byte_width": int(payload["format"]["comp_byte_width"]),
+                "comp_type": payload["format"]["comp_type"],
+                "format_type": payload["format"]["format_type"],
+            },
+            "dimension": payload["dimension"],
+            "width": int(payload["width"]),
+            "height": int(payload["height"]),
+            "mips": int(payload["mip_levels"]),
+            "sample_count": int(payload["sample_count"]),
+            "byte_size": int(payload["byte_size"]),
+        }
+
+    def _compact_buffer(self, buffer_desc):
+        payload = _serialize_buffer(self.ctx, buffer_desc)
+        return {
+            "kind": "buffer",
+            "resource_id": payload["resource_id"],
+            "name": payload["name"],
+            "byte_size": int(payload["byte_size"]),
+            "usage_flags": payload["creation_flags"],
+        }
+
+    def _resource_sort_key(self, item, sort_by):
+        if sort_by == "size":
+            return (-int(item.get("byte_size", 0)), item.get("name", "").lower(), item.get("resource_id", ""))
+        return (item.get("name", "").lower(), -int(item.get("byte_size", 0)), item.get("resource_id", ""))
+
+    def _resource_recommendations(self, item):
+        if item["kind"] == "texture":
+            return [
+                {"tool": "renderdoc_get_texture_data", "arguments": {"texture_id": item["resource_id"]}},
+                {"tool": "renderdoc_get_pixel_history", "arguments": {"texture_id": item["resource_id"], "x": 0, "y": 0}},
+                {"tool": "renderdoc_debug_pixel", "arguments": {"texture_id": item["resource_id"], "x": 0, "y": 0}},
+                {"tool": "renderdoc_save_texture_to_file", "arguments": {"texture_id": item["resource_id"]}},
+            ]
+        return [
+            {"tool": "renderdoc_get_buffer_data", "arguments": {"buffer_id": item["resource_id"], "offset": 0}},
+        ]
+
+    def _list_resource_items(self, kind, name_filter, sort_by):
+        self._ensure_capture_loaded()
+        name_filter_lower = (str(name_filter or "").strip().lower()) or None
+
+        def matches(item_name):
+            return not name_filter_lower or name_filter_lower in item_name.lower()
+
+        items = []
+        if kind in ("all", "textures"):
+            items.extend([self._compact_texture(tex) for tex in self.ctx.GetTextures()])
+        if kind in ("all", "buffers"):
+            items.extend([self._compact_buffer(buf) for buf in self.ctx.GetBuffers()])
+        items = [item for item in items if matches(item["name"])]
+        items.sort(key=lambda item: self._resource_sort_key(item, sort_by))
+        return items
+
+    def _compact_shader_binding(self, shader_payload):
+        return {
+            "stage": shader_payload["stage"],
+            "shader_id": shader_payload["shader_id"],
+            "shader_name": shader_payload["shader_name"],
+            "entry_point": shader_payload["entry_point"],
+            "read_only_resource_count": len(shader_payload.get("read_only_resources", [])),
+            "read_write_resource_count": len(shader_payload.get("read_write_resources", [])),
+            "sampler_count": len(shader_payload.get("samplers", [])),
+            "constant_block_count": len(shader_payload.get("constant_blocks", [])),
+        }
+
+    def _page_items(self, items, cursor, limit):
+        offset = int(cursor or 0)
+        page_limit = int(limit or 0)
+        page = items[offset : offset + page_limit]
+        next_offset = offset + len(page)
+        return {
+            "items": page,
+            "page": {
+                "cursor": str(offset),
+                "next_cursor": str(next_offset) if next_offset < len(items) else "",
+                "limit": page_limit,
+                "returned_count": len(page),
+                "total_count": len(items),
+                "matched_count": len(items),
+                "has_more": next_offset < len(items),
+            },
+        }
+
+    def _get_output_target_items(self, pipeline):
+        items = []
+        for index, descriptor in enumerate(pipeline.get("output_targets", [])):
+            entry = dict(descriptor)
+            entry["slot_kind"] = "color"
+            entry["slot_index"] = index
+            items.append(entry)
+        depth_target = pipeline.get("depth_target")
+        if depth_target and depth_target.get("resource_id"):
+            entry = dict(depth_target)
+            entry["slot_kind"] = "depth"
+            entry["slot_index"] = -1
+            items.append(entry)
+        depth_resolve_target = pipeline.get("depth_resolve_target")
+        if depth_resolve_target and depth_resolve_target.get("resource_id"):
+            entry = dict(depth_resolve_target)
+            entry["slot_kind"] = "depth_resolve"
+            entry["slot_index"] = -1
+            items.append(entry)
+        return items
 
     def _texture_slice_count(self, texture, mip_level):
         if int(getattr(texture, "arraysize", 0)) > 1:
@@ -827,6 +968,91 @@ class BridgeClient(object):
             "resource_counts": analysis["resource_counts"],
         }
 
+    def _get_capture_overview(self):
+        overview = self._get_capture_summary()
+        analysis = self._ensure_frame_analysis()
+        timing_payload = self._ensure_timing_data()
+        overview["root_pass_count"] = len(analysis.get("root_pass_ids", []))
+        overview["action_root_count"] = len(analysis.get("root_action_ids", []))
+        overview["capabilities"] = {
+            "timing_data": bool(timing_payload.get("timing_available")),
+            "pixel_history": True,
+            "shader_disassembly": True,
+        }
+        return overview
+
+    def _get_analysis_worklist(self, focus, limit):
+        analysis = self._ensure_frame_analysis()
+        limit = max(1, int(limit or 10))
+        focus = str(focus or "performance").strip().lower() or "performance"
+
+        items = []
+        if focus == "performance":
+            hotspots = frame_analysis.build_performance_hotspots(analysis, self._ensure_timing_data(), limit=limit)
+            for entry in hotspots.get("top_passes", []):
+                items.append(
+                    {
+                        "kind": "pass",
+                        "id": entry["pass_id"],
+                        "label": entry["name"],
+                        "reason": "High-impact pass ranked by {}.".format(entry["metric_name"]),
+                        "recommended_call": {
+                            "tool": "renderdoc_get_pass_summary",
+                            "arguments": {"pass_id": entry["pass_id"]},
+                        },
+                    }
+                )
+            for entry in hotspots.get("top_events", []):
+                if len(items) >= limit:
+                    break
+                items.append(
+                    {
+                        "kind": "event",
+                        "id": int(entry["event_id"]),
+                        "label": entry["name"],
+                        "reason": "High-impact event ranked by {}.".format(entry["metric_name"]),
+                        "recommended_call": {
+                            "tool": "renderdoc_get_pipeline_overview",
+                            "arguments": {"event_id": int(entry["event_id"])},
+                        },
+                    }
+                )
+        elif focus == "structure":
+            for pass_id in analysis.get("root_pass_ids", [])[:limit]:
+                entry = frame_analysis.get_pass_summary(analysis, pass_id)
+                if entry is None:
+                    continue
+                next_tool = "renderdoc_get_pass_summary"
+                next_args = {"pass_id": entry["pass_id"]}
+                if int(entry.get("child_pass_count", 0)) > 0:
+                    next_tool = "renderdoc_list_passes"
+                    next_args = {"parent_pass_id": entry["pass_id"]}
+                items.append(
+                    {
+                        "kind": "pass",
+                        "id": entry["pass_id"],
+                        "label": entry["name"],
+                        "reason": "Root-level structural pass with {} child pass(es).".format(entry["child_pass_count"]),
+                        "recommended_call": {"tool": next_tool, "arguments": next_args},
+                    }
+                )
+        else:
+            for item in self._list_resource_items("all", None, "size")[:limit]:
+                items.append(
+                    {
+                        "kind": "resource",
+                        "id": item["resource_id"],
+                        "label": item["name"],
+                        "reason": "Large {} resource by byte size.".format(item["kind"]),
+                        "recommended_call": {
+                            "tool": "renderdoc_get_resource_summary",
+                            "arguments": {"resource_id": item["resource_id"]},
+                        },
+                    }
+                )
+
+        return {"focus": focus, "count": len(items), "items": items}
+
     def _get_action_tree(self, max_depth, name_filter, limit):
         analysis = self._ensure_frame_analysis()
         return frame_analysis.build_action_tree_result(
@@ -837,13 +1063,19 @@ class BridgeClient(object):
             limit=limit,
         )
 
-    def _list_actions(self, max_depth, name_filter, cursor, limit):
+    def _list_actions(self, parent_event_id, name_filter, flags_filter, cursor, limit):
         analysis = self._ensure_frame_analysis()
-        return frame_analysis.build_action_list_result(
-            analysis["action_tree"],
-            analysis["total_actions"],
-            max_depth=max_depth,
+        if parent_event_id not in (None, "") and int(parent_event_id) not in analysis.get("action_index", {}):
+            raise BridgeError(
+                "invalid_event_id",
+                "The supplied event_id does not exist in the current capture.",
+                {"event_id": int(parent_event_id)},
+            )
+        return frame_analysis.build_action_children_result(
+            analysis,
+            parent_event_id=parent_event_id,
             name_filter=name_filter,
+            flags_filter=flags_filter,
             cursor=cursor,
             limit=limit,
         )
@@ -857,17 +1089,23 @@ class BridgeClient(object):
             timing_payload=timing_payload,
         )
 
-    def _list_passes(self, cursor, limit, category_filter, name_filter, sort_by, threshold_ms):
+    def _list_passes(self, parent_pass_id, cursor, limit, category_filter, name_filter, sort_by):
         analysis = self._ensure_frame_analysis()
+        if parent_pass_id not in (None, "") and parent_pass_id not in analysis.get("pass_index", {}):
+            raise BridgeError(
+                "invalid_pass_id",
+                "The supplied pass_id does not exist in the active frame analysis.",
+                {"pass_id": parent_pass_id},
+            )
         timing_payload = self._ensure_timing_data() if sort_by == "gpu_time" else None
         return frame_analysis.list_passes(
             analysis,
+            parent_pass_id=parent_pass_id,
             cursor=cursor,
             limit=limit,
             category_filter=category_filter,
             name_filter=name_filter,
             sort_by=sort_by,
-            threshold_ms=threshold_ms,
             timing_payload=timing_payload,
         )
 
@@ -882,6 +1120,17 @@ class BridgeClient(object):
             )
         return details
 
+    def _get_pass_summary(self, pass_id):
+        analysis = self._ensure_frame_analysis()
+        summary = frame_analysis.get_pass_summary(analysis, pass_id)
+        if summary is None:
+            raise BridgeError(
+                "invalid_pass_id",
+                "The supplied pass_id does not exist in the active frame analysis.",
+                {"pass_id": pass_id},
+            )
+        return summary
+
     def _get_timing_data(self, pass_id):
         analysis = self._ensure_frame_analysis()
         if frame_analysis.get_pass_details(analysis, pass_id) is None:
@@ -891,6 +1140,23 @@ class BridgeClient(object):
                 {"pass_id": pass_id},
             )
         return frame_analysis.build_timing_result(analysis, pass_id, self._ensure_timing_data())
+
+    def _list_timing_events(self, pass_id, cursor, limit, sort_by):
+        analysis = self._ensure_frame_analysis()
+        if frame_analysis.get_pass_summary(analysis, pass_id) is None:
+            raise BridgeError(
+                "invalid_pass_id",
+                "The supplied pass_id does not exist in the active frame analysis.",
+                {"pass_id": pass_id},
+            )
+        return frame_analysis.list_timing_events(
+            analysis,
+            pass_id,
+            self._ensure_timing_data(),
+            cursor=cursor,
+            limit=limit,
+            sort_by=sort_by,
+        )
 
     def _get_performance_hotspots(self):
         analysis = self._ensure_frame_analysis()
@@ -913,6 +1179,182 @@ class BridgeClient(object):
 
         self.ctx.Replay().BlockInvoke(callback)
         return details
+
+    def _get_action_summary(self, event_id):
+        analysis = self._ensure_frame_analysis()
+        summary = frame_analysis.build_action_summary_result(analysis, event_id)
+        if summary is None:
+            raise BridgeError(
+                "invalid_event_id",
+                "The supplied event_id does not exist in the current capture.",
+                {"event_id": int(event_id)},
+            )
+        return summary
+
+    def _get_pipeline_overview(self, event_id):
+        pipeline_payload = self._get_pipeline_state(event_id)
+        api_pipeline_payload = self._get_api_pipeline_state(event_id)
+        pipeline = pipeline_payload.get("pipeline", {})
+        shaders = [self._compact_shader_binding(item) for item in pipeline.get("shaders", [])]
+        overview = {
+            "event_id": int(event_id),
+            "api": pipeline_payload.get("api", api_pipeline_payload.get("api", "")),
+            "action": pipeline_payload.get("action", api_pipeline_payload.get("action", {})),
+            "pipeline": {
+                "available": bool(pipeline.get("available", False)),
+                "reason": pipeline.get("reason", ""),
+                "topology": pipeline.get("topology", "Unknown"),
+                "graphics_pipeline_object": pipeline.get("graphics_pipeline_object", ""),
+                "compute_pipeline_object": pipeline.get("compute_pipeline_object", ""),
+                "counts": {
+                    "descriptor_accesses": len(pipeline.get("descriptor_accesses", [])),
+                    "vertex_buffers": len(pipeline.get("vertex_buffers", [])),
+                    "vertex_inputs": len(pipeline.get("vertex_inputs", [])),
+                    "output_targets": len(self._get_output_target_items(pipeline)),
+                    "shaders": len(shaders),
+                },
+                "shaders": shaders,
+                "api_details_available": bool((api_pipeline_payload.get("api_pipeline") or {}).get("available", False)),
+                "api_details_api": (api_pipeline_payload.get("api_pipeline") or {}).get(
+                    "api",
+                    api_pipeline_payload.get("api", ""),
+                ),
+            },
+        }
+        return overview
+
+    def _list_pipeline_bindings(self, event_id, binding_kind, cursor, limit):
+        pipeline_payload = self._get_pipeline_state(event_id)
+        api_pipeline_payload = self._get_api_pipeline_state(event_id)
+        pipeline = pipeline_payload.get("pipeline", {})
+
+        if binding_kind == "descriptor_accesses":
+            items = list(pipeline.get("descriptor_accesses", []))
+        elif binding_kind == "vertex_buffers":
+            items = list(pipeline.get("vertex_buffers", []))
+        elif binding_kind == "vertex_inputs":
+            items = list(pipeline.get("vertex_inputs", []))
+        elif binding_kind == "output_targets":
+            items = self._get_output_target_items(pipeline)
+        elif binding_kind == "shaders":
+            items = [self._compact_shader_binding(item) for item in pipeline.get("shaders", [])]
+        else:
+            api_details = api_pipeline_payload.get("api_pipeline")
+            items = [api_details] if api_details is not None else []
+
+        paging = self._page_items(items, cursor or 0, limit or 50)
+        return {
+            "event_id": int(event_id),
+            "api": pipeline_payload.get("api", api_pipeline_payload.get("api", "")),
+            "action": pipeline_payload.get("action", api_pipeline_payload.get("action", {})),
+            "binding_kind": binding_kind,
+            "available": bool(pipeline.get("available", False)) if binding_kind != "api_details" else True,
+            "items": paging["items"],
+            "meta": {"page": paging["page"]},
+        }
+
+    def _get_shader_summary(self, event_id, stage_name):
+        pipeline_payload = self._get_pipeline_state(event_id)
+        pipeline = pipeline_payload.get("pipeline", {})
+        shader_payload = next(
+            (item for item in pipeline.get("shaders", []) if str(item.get("stage", "")).lower() == str(stage_name).lower()),
+            None,
+        )
+        if shader_payload is None:
+            raise BridgeError(
+                "shader_not_bound",
+                "No shader is bound at the supplied stage for the selected event.",
+                {"event_id": int(event_id), "stage": stage_name},
+            )
+
+        targets_payload = self._get_shader_disassembly_targets(event_id)
+        return {
+            "event_id": int(event_id),
+            "api": pipeline_payload.get("api", ""),
+            "action": pipeline_payload.get("action", {}),
+            "shader": {
+                "stage": shader_payload["stage"],
+                "shader_id": shader_payload["shader_id"],
+                "shader_name": shader_payload["shader_name"],
+                "entry_point": shader_payload["entry_point"],
+                "reflection": dict(shader_payload.get("reflection", {})),
+                "counts": {
+                    "read_only_resources": len(shader_payload.get("read_only_resources", [])),
+                    "read_write_resources": len(shader_payload.get("read_write_resources", [])),
+                    "samplers": len(shader_payload.get("samplers", [])),
+                    "constant_blocks": len(shader_payload.get("constant_blocks", [])),
+                },
+            },
+            "disassembly": targets_payload,
+        }
+
+    def _get_shader_code_chunk(self, event_id, stage_name, target, start_line, line_count):
+        start_line = max(1, int(start_line or 1))
+        line_count = max(1, int(line_count or 200))
+        cache_key = (int(event_id), str(stage_name), str(target or "").lower())
+        cached = self.shader_code_cache.get(cache_key)
+
+        if cached is None:
+            shader_payload = self._get_shader_code(event_id, stage_name, target)
+            disassembly = shader_payload.get("disassembly", {})
+            selected_target = str(disassembly.get("target", "") or "")
+            actual_key = (int(event_id), str(stage_name), selected_target.lower())
+            text = str(disassembly.get("text", "") or "")
+            cached = {
+                "event_id": int(event_id),
+                "api": shader_payload.get("api", ""),
+                "action": shader_payload.get("action", {}),
+                "shader": {
+                    "stage": shader_payload.get("shader", {}).get("stage", stage_name),
+                    "shader_id": shader_payload.get("shader", {}).get("shader_id", ""),
+                    "shader_name": shader_payload.get("shader", {}).get("shader_name", ""),
+                },
+                "available": bool(disassembly.get("available", False)),
+                "reason": disassembly.get("reason", ""),
+                "target": selected_target,
+                "available_targets": list(disassembly.get("available_targets", [])),
+                "lines": text.splitlines(),
+            }
+            self.shader_code_cache[actual_key] = cached
+            self.shader_code_cache[cache_key] = cached
+
+        if not cached["available"]:
+            return {
+                "event_id": cached["event_id"],
+                "api": cached["api"],
+                "action": cached["action"],
+                "shader": dict(cached["shader"]),
+                "target": cached["target"],
+                "available_targets": list(cached["available_targets"]),
+                "available": False,
+                "reason": cached["reason"],
+                "start_line": start_line,
+                "returned_line_count": 0,
+                "total_lines": 0,
+                "has_more": False,
+                "text": "",
+            }
+
+        lines = cached["lines"]
+        offset = start_line - 1
+        chunk = lines[offset : offset + line_count]
+        returned_line_count = len(chunk)
+        total_lines = len(lines)
+        return {
+            "event_id": cached["event_id"],
+            "api": cached["api"],
+            "action": cached["action"],
+            "shader": dict(cached["shader"]),
+            "target": cached["target"],
+            "available_targets": list(cached["available_targets"]),
+            "available": True,
+            "reason": "",
+            "start_line": start_line,
+            "returned_line_count": returned_line_count,
+            "total_lines": total_lines,
+            "has_more": (offset + returned_line_count) < total_lines,
+            "text": "\n".join(chunk),
+        }
 
     def _get_pipeline_state(self, event_id):
         self._ensure_capture_loaded()
@@ -1175,8 +1617,36 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return response
 
-    def _get_pixel_history(self, texture_id, x, y, mip_level, array_slice, sample):
-        return self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)
+    def _get_shader_disassembly_targets(self, event_id):
+        self._ensure_capture_loaded()
+        self._set_event(event_id)
+        payload = {
+            "available": False,
+            "reason": "",
+            "default_target": "",
+            "available_targets": [],
+        }
+
+        def callback(controller):
+            targets = _get_disassembly_targets(controller)
+            payload["available_targets"] = targets
+            payload["default_target"] = targets[0] if targets else ""
+            payload["available"] = bool(targets)
+            if not targets:
+                payload["reason"] = "RenderDoc did not report any shader disassembly targets."
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return payload
+
+    def _get_pixel_history(self, texture_id, x, y, mip_level, array_slice, sample, cursor, limit):
+        payload = self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)
+        modifications = list(payload.get("modifications", []))
+        paging = self._page_items(modifications, cursor or 0, limit or 100)
+        payload["modifications"] = paging["items"]
+        payload["total_modification_count"] = len(modifications)
+        payload["modification_count"] = len(paging["items"])
+        payload["meta"] = {"page": paging["page"]}
+        return payload
 
     def _debug_pixel(self, texture_id, x, y, mip_level, array_slice, sample):
         payload = self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)
@@ -1264,10 +1734,15 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return response
 
-    def _get_buffer_data(self, buffer_id, offset, size):
+    def _get_buffer_data(self, buffer_id, offset, size, encoding):
         self._ensure_capture_loaded()
         self._ensure_final_event()
-        response = {"buffer_id": buffer_id, "offset": int(offset), "size": int(size)}
+        response = {
+            "buffer_id": buffer_id,
+            "offset": int(offset),
+            "size": int(size),
+            "encoding": str(encoding or "hex"),
+        }
 
         def callback(controller):
             buffer_desc = self._find_buffer_by_id(buffer_id)
@@ -1284,11 +1759,13 @@ class BridgeClient(object):
                 )
             raw = controller.GetBufferData(buffer_desc.resourceId, int(offset), int(size))
             data = bytes(raw or b"")
-            response["buffer"] = _serialize_buffer(self.ctx, buffer_desc)
+            response["buffer"] = self._compact_buffer(buffer_desc)
             response["requested_range"] = {"offset": int(offset), "size": int(size)}
             response["returned_size"] = len(data)
-            response["data_base64"] = base64.b64encode(data).decode("ascii")
-            response["data_hex_preview"] = data[:64].hex(" ")
+            if str(encoding or "hex").lower() == "base64":
+                response["data"] = base64.b64encode(data).decode("ascii")
+            else:
+                response["data"] = data.hex(" ")
 
         self.ctx.Replay().BlockInvoke(callback)
         return response
@@ -1355,32 +1832,35 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return response
 
-    def _list_resources(self, kind, name_filter):
-        self._ensure_capture_loaded()
-        name_filter_lower = name_filter.lower() if name_filter else None
-
-        def matches(item_name):
-            return not name_filter_lower or name_filter_lower in item_name.lower()
-
-        textures = [_serialize_texture(self.ctx, tex) for tex in self.ctx.GetTextures()]
-        textures = [item for item in textures if matches(item["name"])]
-        buffers = [_serialize_buffer(self.ctx, buf) for buf in self.ctx.GetBuffers()]
-        buffers = [item for item in buffers if matches(item["name"])]
-
-        if kind == "textures":
-            items = textures
-        elif kind == "buffers":
-            items = buffers
-        else:
-            items = textures + buffers
-
+    def _list_resources(self, kind, cursor, limit, name_filter, sort_by):
+        items = self._list_resource_items(kind, name_filter, sort_by)
+        paging = self._page_items(items, cursor or 0, limit or 50)
         return {
             "kind": kind,
-            "count": len(items),
-            "textures": textures if kind in ("textures", "all") else [],
-            "buffers": buffers if kind in ("buffers", "all") else [],
-            "items": items,
+            "sort_by": sort_by,
+            "name_filter": str(name_filter or ""),
+            "items": paging["items"],
+            "meta": {"page": paging["page"]},
         }
+
+    def _get_resource_summary(self, resource_id):
+        self._ensure_capture_loaded()
+
+        for texture in self.ctx.GetTextures():
+            if _resource_id_matches(texture.resourceId, resource_id):
+                item = self._compact_texture(texture)
+                return {"resource": item, "recommended_calls": self._resource_recommendations(item), "meta": {}}
+
+        for buffer_desc in self.ctx.GetBuffers():
+            if _resource_id_matches(buffer_desc.resourceId, resource_id):
+                item = self._compact_buffer(buffer_desc)
+                return {"resource": item, "recommended_calls": self._resource_recommendations(item), "meta": {}}
+
+        raise BridgeError(
+            "invalid_resource_id",
+            "The supplied resource_id does not exist in the active capture.",
+            {"resource_id": resource_id},
+        )
 
     def _close_capture(self):
         if self.ctx.IsCaptureLoaded():
