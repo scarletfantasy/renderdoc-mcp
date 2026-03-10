@@ -120,6 +120,12 @@ class ServiceContext:
 
         return self.normalize_required_int(value, field_name)
 
+    def normalize_required_string(self, value: Any, field_name: str) -> str:
+        normalized = self.normalize_optional_string(value)
+        if normalized is None:
+            raise ReplayFailureError(f"{field_name} must be a non-empty string.", {field_name: value})
+        return normalized
+
     def normalize_required_int(self, value: Any, field_name: str) -> int:
         if isinstance(value, bool):
             raise ReplayFailureError(f"{field_name} must be an integer.", {field_name: value})
@@ -138,3 +144,15 @@ class ServiceContext:
                 raise ReplayFailureError(f"{field_name} must be an integer.", {field_name: value}) from exc
 
         raise ReplayFailureError(f"{field_name} must be an integer.", {field_name: value})
+
+    def normalize_non_negative_int(self, value: Any, field_name: str) -> int:
+        normalized = self.normalize_required_int(value, field_name)
+        if normalized < 0:
+            raise ReplayFailureError(f"{field_name} must be greater than or equal to 0.", {field_name: normalized})
+        return normalized
+
+    def normalize_positive_int(self, value: Any, field_name: str) -> int:
+        normalized = self.normalize_required_int(value, field_name)
+        if normalized <= 0:
+            raise ReplayFailureError(f"{field_name} must be greater than 0.", {field_name: normalized})
+        return normalized

@@ -94,6 +94,24 @@ def renderdoc_get_pass_details(capture_path: str, pass_id: str) -> dict[str, Any
 
 
 @app.tool(
+    name="renderdoc_get_timing_data",
+    description="Fetch per-event GPU timing data for a previously listed pass_id when the capture supports GPU duration counters.",
+    structured_output=True,
+)
+def renderdoc_get_timing_data(capture_path: str, pass_id: str) -> dict[str, Any]:
+    return get_service().get_timing_data(capture_path, pass_id)
+
+
+@app.tool(
+    name="renderdoc_get_performance_hotspots",
+    description="Rank top-level passes and individual events by GPU timing, or fall back to heuristic hotspots when timing is unavailable.",
+    structured_output=True,
+)
+def renderdoc_get_performance_hotspots(capture_path: str) -> dict[str, Any]:
+    return get_service().get_performance_hotspots(capture_path)
+
+
+@app.tool(
     name="renderdoc_get_action_details",
     description="Fetch details for a specific RenderDoc event_id, including draw or dispatch metadata.",
     structured_output=True,
@@ -136,6 +154,115 @@ def renderdoc_list_resources(
     name_filter: str | None = None,
 ) -> dict[str, Any]:
     return get_service().list_resources(capture_path, kind=kind, name_filter=name_filter)
+
+
+@app.tool(
+    name="renderdoc_get_pixel_history",
+    description="Inspect the ordered pixel history for a texture pixel and subresource in the active capture.",
+    structured_output=True,
+)
+def renderdoc_get_pixel_history(
+    capture_path: str,
+    texture_id: str,
+    x: int,
+    y: int,
+    mip_level: int = 0,
+    array_slice: int = 0,
+    sample: int = 0,
+) -> dict[str, Any]:
+    return get_service().get_pixel_history(
+        capture_path,
+        texture_id,
+        x,
+        y,
+        mip_level=mip_level,
+        array_slice=array_slice,
+        sample=sample,
+    )
+
+
+@app.tool(
+    name="renderdoc_debug_pixel",
+    description="Summarize the draw or GPU events that affected a texture pixel, derived from RenderDoc pixel history.",
+    structured_output=True,
+)
+def renderdoc_debug_pixel(
+    capture_path: str,
+    texture_id: str,
+    x: int,
+    y: int,
+    mip_level: int = 0,
+    array_slice: int = 0,
+    sample: int = 0,
+) -> dict[str, Any]:
+    return get_service().debug_pixel(
+        capture_path,
+        texture_id,
+        x,
+        y,
+        mip_level=mip_level,
+        array_slice=array_slice,
+        sample=sample,
+    )
+
+
+@app.tool(
+    name="renderdoc_get_texture_data",
+    description="Return a JSON-friendly pixel preview grid for a selected texture region and subresource.",
+    structured_output=True,
+)
+def renderdoc_get_texture_data(
+    capture_path: str,
+    texture_id: str,
+    mip_level: int,
+    x: int,
+    y: int,
+    width: int,
+    height: int,
+    array_slice: int = 0,
+    sample: int = 0,
+) -> dict[str, Any]:
+    return get_service().get_texture_data(
+        capture_path,
+        texture_id,
+        mip_level,
+        x,
+        y,
+        width,
+        height,
+        array_slice=array_slice,
+        sample=sample,
+    )
+
+
+@app.tool(
+    name="renderdoc_get_buffer_data",
+    description="Return a bounded raw byte window from a buffer resource, with metadata and encoded contents.",
+    structured_output=True,
+)
+def renderdoc_get_buffer_data(capture_path: str, buffer_id: str, offset: int, size: int) -> dict[str, Any]:
+    return get_service().get_buffer_data(capture_path, buffer_id, offset, size)
+
+
+@app.tool(
+    name="renderdoc_save_texture_to_file",
+    description="Save a texture resource to disk, inferring the export file type from the output path extension.",
+    structured_output=True,
+)
+def renderdoc_save_texture_to_file(
+    capture_path: str,
+    texture_id: str,
+    output_path: str,
+    mip_level: int = 0,
+    array_slice: int = 0,
+) -> dict[str, Any]:
+    return get_service().save_texture_to_file(
+        capture_path,
+        texture_id,
+        output_path,
+        mip_level=mip_level,
+        array_slice=array_slice,
+    )
 
 
 @app.resource(

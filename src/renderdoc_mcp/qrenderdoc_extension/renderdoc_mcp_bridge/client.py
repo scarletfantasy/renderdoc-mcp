@@ -1,3 +1,4 @@
+import base64
 import json
 import os
 import threading
@@ -16,6 +17,7 @@ try:
         _api_name,
         _count_actions,
         _enum_name,
+        _float_vector,
         _resource_id,
         _serialize_action,
         _serialize_action_analysis_node,
@@ -36,6 +38,7 @@ except Exception:
         _api_name,
         _count_actions,
         _enum_name,
+        _float_vector,
         _resource_id,
         _serialize_action,
         _serialize_action_analysis_node,
@@ -80,6 +83,91 @@ def _select_pipeline_object(state, stage_name):
     return ("compute_pipeline_object" if stage_name == "Compute" else "graphics_pipeline_object", graphics)
 
 
+def _subresource(mip_level, array_slice, sample):
+    sub = rd.Subresource()
+    sub.mip = int(mip_level)
+    sub.slice = int(array_slice)
+    sub.sample = int(sample)
+    return sub
+
+
+def _resource_id_matches(value, expected):
+    return _resource_id(value) == str(expected)
+
+
+def _safe_float(value):
+    try:
+        return float(value)
+    except Exception:
+        return 0.0
+
+
+def _safe_int(value, default=0):
+    try:
+        return int(value)
+    except Exception:
+        return int(default)
+
+
+def _counter_value_as_float(value, result_type_name, byte_width):
+    type_name = str(result_type_name or "").lower()
+    if "float" in type_name or "double" in type_name:
+        if int(byte_width or 0) >= 8 and hasattr(value, "d"):
+            return float(value.d)
+        if hasattr(value, "f"):
+            return float(value.f)
+
+    if "unsigned" in type_name or "uint" in type_name:
+        if int(byte_width or 0) >= 8 and hasattr(value, "u64"):
+            return float(value.u64)
+        if hasattr(value, "u32"):
+            return float(value.u32)
+
+    if "signed" in type_name or "sint" in type_name:
+        if int(byte_width or 0) >= 8 and hasattr(value, "s64"):
+            return float(value.s64)
+        if hasattr(value, "s32"):
+            return float(value.s32)
+
+    for attr in ("d", "f", "u64", "u32", "s64", "s32"):
+        if hasattr(value, attr):
+            return float(getattr(value, attr))
+    return None
+
+
+def _serialize_pixel_value(value):
+    if value is None:
+        return None
+
+    if all(hasattr(value, item) for item in ("x", "y", "z", "w")):
+        return [float(value.x), float(value.y), float(value.z), float(value.w)]
+
+    for attr in ("floatValue", "floatVec", "value"):
+        nested = getattr(value, attr, None)
+        if nested is not None and nested is not value:
+            serialized = _serialize_pixel_value(nested)
+            if serialized is not None:
+                return serialized
+
+    components = []
+    for attr in ("r", "g", "b", "a"):
+        if hasattr(value, attr):
+            components.append(_safe_float(getattr(value, attr)))
+    if components:
+        while len(components) < 4:
+            components.append(0.0)
+        return components[:4]
+
+    if isinstance(value, (list, tuple)):
+        return [_safe_float(item) for item in list(value)[:4]]
+
+    for attr in ("d", "f", "u64", "u32", "s64", "s32"):
+        if hasattr(value, attr):
+            return _safe_float(getattr(value, attr))
+
+    return str(value)
+
+
 class BridgeClient(object):
     def __init__(self, ctx):
         self.ctx = ctx
@@ -88,6 +176,7 @@ class BridgeClient(object):
         self.stop_event = threading.Event()
         self.thread = None
         self.analysis_cache = frame_analysis.AnalysisCache()
+        self.timing_cache = frame_analysis.AnalysisCache()
 
     def start(self):
         host = os.environ.get("RENDERDOC_MCP_BRIDGE_HOST")
@@ -142,6 +231,7 @@ class BridgeClient(object):
                 pass
             self.sock = None
         self.analysis_cache.clear()
+        self.timing_cache.clear()
 
     def _send(self, message):
         self.sock.send_text(json.dumps(message, separators=(",", ":")) + "\n")
@@ -211,6 +301,7 @@ class BridgeClient(object):
 
     def _clear_analysis_cache(self):
         self.analysis_cache.clear()
+        self.timing_cache.clear()
 
     def _capture_cache_key(self):
         capture_path = self.ctx.GetCaptureFilename()
@@ -263,6 +354,293 @@ class BridgeClient(object):
 
         self.ctx.Replay().BlockInvoke(callback)
         return self.analysis_cache.store(cache_key, payload["value"])
+
+    def _analysis_max_event_id(self, nodes):
+        maximum = 0
+        for node in nodes:
+            maximum = max(maximum, int(node.get("event_id", 0)), self._analysis_max_event_id(node.get("children", [])))
+        return maximum
+
+    def _ensure_final_event(self):
+        analysis = self._ensure_frame_analysis()
+        event_id = self._analysis_max_event_id(analysis.get("action_tree", []))
+        if event_id > 0:
+            self._set_event(event_id)
+        return analysis
+
+    def _find_texture_by_id(self, texture_id):
+        for texture in self.ctx.GetTextures():
+            if _resource_id_matches(texture.resourceId, texture_id):
+                return texture
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "invalid_resource_id",
+                    "message": "The supplied texture_id does not exist in the active capture.",
+                    "details": {"texture_id": texture_id},
+                }
+            )
+        )
+
+    def _find_buffer_by_id(self, buffer_id):
+        for buffer_desc in self.ctx.GetBuffers():
+            if _resource_id_matches(buffer_desc.resourceId, buffer_id):
+                return buffer_desc
+        raise RuntimeError(
+            json.dumps(
+                {
+                    "code": "invalid_resource_id",
+                    "message": "The supplied buffer_id does not exist in the active capture.",
+                    "details": {"buffer_id": buffer_id},
+                }
+            )
+        )
+
+    def _texture_slice_count(self, texture, mip_level):
+        if int(getattr(texture, "arraysize", 0)) > 1:
+            return int(texture.arraysize)
+        return max(1, int(getattr(texture, "depth", 1)) >> int(mip_level))
+
+    def _texture_dimensions(self, texture, mip_level):
+        mip = int(mip_level)
+        width = max(1, int(getattr(texture, "width", 1)) >> mip)
+        height = max(1, int(getattr(texture, "height", 1)) >> mip)
+        depth = max(1, int(getattr(texture, "depth", 1)) >> mip)
+        return width, height, depth
+
+    def _validate_texture_request(self, texture, mip_level, array_slice, sample, x=None, y=None, width=None, height=None):
+        mip_level = int(mip_level)
+        array_slice = int(array_slice)
+        sample = int(sample)
+        mip_levels = max(1, int(getattr(texture, "mips", 1)))
+        if mip_level >= mip_levels:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_subresource",
+                        "message": "mip_level is out of bounds for the selected texture.",
+                        "details": {"mip_level": mip_level, "mip_levels": mip_levels},
+                    }
+                )
+            )
+
+        slice_count = self._texture_slice_count(texture, mip_level)
+        if array_slice >= slice_count:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_subresource",
+                        "message": "array_slice is out of bounds for the selected texture.",
+                        "details": {"array_slice": array_slice, "slice_count": slice_count},
+                    }
+                )
+            )
+
+        sample_count = max(1, int(getattr(texture, "msSamp", 1)))
+        if sample >= sample_count:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_subresource",
+                        "message": "sample is out of bounds for the selected texture.",
+                        "details": {"sample": sample, "sample_count": sample_count},
+                    }
+                )
+            )
+
+        mip_width, mip_height, mip_depth = self._texture_dimensions(texture, mip_level)
+        if x is not None and int(x) >= mip_width:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_texture_region",
+                        "message": "x is out of bounds for the selected texture mip.",
+                        "details": {"x": int(x), "mip_width": mip_width},
+                    }
+                )
+            )
+        if y is not None and int(y) >= mip_height:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_texture_region",
+                        "message": "y is out of bounds for the selected texture mip.",
+                        "details": {"y": int(y), "mip_height": mip_height},
+                    }
+                )
+            )
+        if width is not None and int(x or 0) + int(width) > mip_width:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_texture_region",
+                        "message": "The requested width extends past the selected texture mip.",
+                        "details": {"x": int(x or 0), "width": int(width), "mip_width": mip_width},
+                    }
+                )
+            )
+        if height is not None and int(y or 0) + int(height) > mip_height:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_texture_region",
+                        "message": "The requested height extends past the selected texture mip.",
+                        "details": {"y": int(y or 0), "height": int(height), "mip_height": mip_height},
+                    }
+                )
+            )
+        return {"mip_width": mip_width, "mip_height": mip_height, "mip_depth": mip_depth, "slice_count": slice_count, "sample_count": sample_count}
+
+    def _default_comp_type(self, texture):
+        comp_type = getattr(getattr(texture, "format", None), "compType", None)
+        if comp_type is not None:
+            return comp_type
+        if rd is not None and hasattr(rd, "CompType") and hasattr(rd.CompType, "Typeless"):
+            return rd.CompType.Typeless
+        return 0
+
+    def _action_brief(self, action, structured_file, event_id):
+        if action is None:
+            return {"event_id": int(event_id), "name": "Event {}".format(int(event_id)), "flags": []}
+        return {
+            "event_id": int(action.eventId),
+            "name": action.GetName(structured_file) or action.customName or "Event {}".format(action.eventId),
+            "flags": _action_flags(action),
+        }
+
+    def _ensure_timing_data(self):
+        self._ensure_capture_loaded()
+        cache_key = self._capture_cache_key()
+        cached = self.timing_cache.get(cache_key)
+        if cached is not None:
+            return cached
+
+        payload = {}
+
+        def callback(controller):
+            event_counter = None
+            if rd is not None and hasattr(rd, "GPUCounter") and hasattr(rd.GPUCounter, "EventGPUDuration"):
+                event_counter = rd.GPUCounter.EventGPUDuration
+
+            if event_counter is None:
+                payload["value"] = {
+                    "timing_available": False,
+                    "counter_name": "EventGPUDuration",
+                    "rows": [],
+                    "reason": "This RenderDoc build does not expose GPUCounter.EventGPUDuration.",
+                }
+                return
+
+            counters = list(controller.EnumerateCounters() or [])
+            if event_counter not in counters:
+                payload["value"] = {
+                    "timing_available": False,
+                    "counter_name": _enum_name(event_counter),
+                    "rows": [],
+                    "reason": "The active replay device does not support the EventGPUDuration counter.",
+                }
+                return
+
+            counter_desc = controller.DescribeCounter(event_counter)
+            result_type_name = _enum_name(getattr(counter_desc, "resultType", ""))
+            byte_width = int(getattr(counter_desc, "resultByteWidth", 0))
+            rows = []
+            for item in controller.FetchCounters([event_counter]) or []:
+                seconds = _counter_value_as_float(getattr(item, "value", None), result_type_name, byte_width)
+                if seconds is None:
+                    continue
+                rows.append(
+                    {
+                        "event_id": int(getattr(item, "eventId", 0)),
+                        "gpu_time_ms": round(float(seconds) * 1000.0, 6),
+                    }
+                )
+            payload["value"] = {
+                "timing_available": True,
+                "counter_name": _enum_name(event_counter),
+                "rows": sorted(rows, key=lambda row: row["event_id"]),
+            }
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return self.timing_cache.store(cache_key, payload["value"])
+
+    def _serialize_pixel_modification(self, modification, structured_file):
+        event_id = int(getattr(modification, "eventId", 0))
+        action = self.ctx.GetAction(event_id)
+        failed_fields = [
+            ("sampleMasked", "sample_masked"),
+            ("backfaceCulled", "backface_culled"),
+            ("depthClipped", "depth_clipped"),
+            ("viewClipped", "view_clipped"),
+            ("scissorClipped", "scissor_clipped"),
+            ("shaderDiscarded", "shader_discarded"),
+            ("depthBoundsFailed", "depth_bounds_failed"),
+            ("depthTestFailed", "depth_test_failed"),
+            ("stencilTestFailed", "stencil_test_failed"),
+        ]
+        failed_tests = [name for attr, name in failed_fields if bool(getattr(modification, attr, False))]
+        payload = {
+            "event_id": event_id,
+            "action": self._action_brief(action, structured_file, event_id),
+            "primitive_id": _safe_int(getattr(modification, "primitiveID", 0)),
+            "fragment_index": _safe_int(getattr(modification, "fragIndex", 0)),
+            "passed": not failed_tests and not bool(getattr(modification, "unboundPS", False)),
+            "failed_tests": failed_tests,
+            "direct_shader_write": bool(getattr(modification, "directShaderWrite", False)),
+            "unbound_pixel_shader": bool(getattr(modification, "unboundPS", False)),
+        }
+
+        for attr, name in failed_fields:
+            payload[name] = bool(getattr(modification, attr, False))
+
+        pre_mod = _serialize_pixel_value(getattr(modification, "preMod", None))
+        shader_out = _serialize_pixel_value(getattr(modification, "shaderOut", None))
+        post_mod = _serialize_pixel_value(getattr(modification, "postMod", None))
+        if pre_mod is not None:
+            payload["pre_mod"] = pre_mod
+        if shader_out is not None:
+            payload["shader_output"] = shader_out
+        if post_mod is not None:
+            payload["post_mod"] = post_mod
+        return payload
+
+    def _pixel_history_payload(self, texture_id, x, y, mip_level, array_slice, sample):
+        self._ensure_capture_loaded()
+        self._ensure_final_event()
+        response = {
+            "query": {
+                "texture_id": texture_id,
+                "x": int(x),
+                "y": int(y),
+                "mip_level": int(mip_level),
+                "array_slice": int(array_slice),
+                "sample": int(sample),
+            }
+        }
+
+        def callback(controller):
+            texture = self._find_texture_by_id(texture_id)
+            validation = self._validate_texture_request(texture, mip_level, array_slice, sample, x=x, y=y, width=1, height=1)
+            comp_type = self._default_comp_type(texture)
+            subresource = _subresource(mip_level, array_slice, sample)
+            usage = list(controller.GetUsage(texture.resourceId) or [])
+            try:
+                modifications = list(controller.PixelHistory(usage, texture.resourceId, int(x), int(y), subresource, comp_type) or [])
+            except TypeError:
+                modifications = list(controller.PixelHistory(texture.resourceId, int(x), int(y), subresource, comp_type) or [])
+            structured_file = controller.GetStructuredFile()
+            response["texture"] = _serialize_texture(self.ctx, texture)
+            response["query"]["mip_dimensions"] = {
+                "width": validation["mip_width"],
+                "height": validation["mip_height"],
+                "depth": validation["mip_depth"],
+            }
+            response["usage_event_count"] = len(usage)
+            response["modifications"] = [self._serialize_pixel_modification(item, structured_file) for item in modifications]
+            response["modification_count"] = len(response["modifications"])
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return response
 
     def _load_capture(self, capture_path):
         if not os.path.isfile(capture_path):
@@ -341,6 +719,24 @@ class BridgeClient(object):
                 )
             )
         return details
+
+    def _get_timing_data(self, pass_id):
+        analysis = self._ensure_frame_analysis()
+        if frame_analysis.get_pass_details(analysis, pass_id) is None:
+            raise RuntimeError(
+                json.dumps(
+                    {
+                        "code": "invalid_pass_id",
+                        "message": "The supplied pass_id does not exist in the active frame analysis.",
+                        "details": {"pass_id": pass_id},
+                    }
+                )
+            )
+        return frame_analysis.build_timing_result(analysis, pass_id, self._ensure_timing_data())
+
+    def _get_performance_hotspots(self):
+        analysis = self._ensure_frame_analysis()
+        return frame_analysis.build_performance_hotspots(analysis, self._ensure_timing_data())
 
     def _get_action_details(self, event_id):
         self._ensure_capture_loaded()
@@ -493,6 +889,186 @@ class BridgeClient(object):
         self.ctx.Replay().BlockInvoke(callback)
         return response
 
+    def _get_pixel_history(self, texture_id, x, y, mip_level, array_slice, sample):
+        return self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)
+
+    def _debug_pixel(self, texture_id, x, y, mip_level, array_slice, sample):
+        payload = self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)
+        grouped = {}
+        ordered = []
+
+        for modification in payload.get("modifications", []):
+            event_id = int(modification["event_id"])
+            entry = grouped.get(event_id)
+            if entry is None:
+                entry = {
+                    "event_id": event_id,
+                    "action": dict(modification["action"]),
+                    "modification_count": 0,
+                    "passed_modification_count": 0,
+                    "failed_modification_count": 0,
+                    "failed_tests": [],
+                    "primitive_ids": [],
+                }
+                grouped[event_id] = entry
+                ordered.append(entry)
+
+            entry["modification_count"] += 1
+            if modification["passed"]:
+                entry["passed_modification_count"] += 1
+            else:
+                entry["failed_modification_count"] += 1
+            for failed_test in modification.get("failed_tests", []):
+                if failed_test not in entry["failed_tests"]:
+                    entry["failed_tests"].append(failed_test)
+            primitive_id = modification.get("primitive_id")
+            if primitive_id not in entry["primitive_ids"]:
+                entry["primitive_ids"].append(primitive_id)
+            if "pre_mod" in modification and "first_pre_mod" not in entry:
+                entry["first_pre_mod"] = modification["pre_mod"]
+            if "post_mod" in modification:
+                entry["last_post_mod"] = modification["post_mod"]
+
+        return {
+            "texture": payload.get("texture"),
+            "query": payload.get("query"),
+            "usage_event_count": payload.get("usage_event_count", 0),
+            "draw_count": len(ordered),
+            "draws": ordered,
+        }
+
+    def _get_texture_data(self, texture_id, mip_level, x, y, width, height, array_slice, sample):
+        self._ensure_capture_loaded()
+        self._ensure_final_event()
+        response = {
+            "query": {
+                "texture_id": texture_id,
+                "x": int(x),
+                "y": int(y),
+                "width": int(width),
+                "height": int(height),
+                "mip_level": int(mip_level),
+                "array_slice": int(array_slice),
+                "sample": int(sample),
+            }
+        }
+
+        def callback(controller):
+            texture = self._find_texture_by_id(texture_id)
+            validation = self._validate_texture_request(texture, mip_level, array_slice, sample, x=x, y=y, width=width, height=height)
+            comp_type = self._default_comp_type(texture)
+            subresource = _subresource(mip_level, array_slice, sample)
+            pixels = []
+            for row_index in range(int(height)):
+                row = []
+                for column_index in range(int(width)):
+                    pixel = controller.PickPixel(texture.resourceId, int(x) + column_index, int(y) + row_index, subresource, comp_type)
+                    row.append(_float_vector(pixel))
+                pixels.append(row)
+            response["texture"] = _serialize_texture(self.ctx, texture)
+            response["query"]["mip_dimensions"] = {
+                "width": validation["mip_width"],
+                "height": validation["mip_height"],
+                "depth": validation["mip_depth"],
+            }
+            response["row_count"] = len(pixels)
+            response["column_count"] = len(pixels[0]) if pixels else 0
+            response["pixels"] = pixels
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return response
+
+    def _get_buffer_data(self, buffer_id, offset, size):
+        self._ensure_capture_loaded()
+        self._ensure_final_event()
+        response = {"buffer_id": buffer_id, "offset": int(offset), "size": int(size)}
+
+        def callback(controller):
+            buffer_desc = self._find_buffer_by_id(buffer_id)
+            byte_size = int(getattr(buffer_desc, "length", 0))
+            if int(offset) + int(size) > byte_size:
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "invalid_buffer_range",
+                            "message": "The requested buffer range extends past the end of the selected buffer.",
+                            "details": {"offset": int(offset), "size": int(size), "buffer_size": byte_size},
+                        }
+                    )
+                )
+            raw = controller.GetBufferData(buffer_desc.resourceId, int(offset), int(size))
+            data = bytes(raw or b"")
+            response["buffer"] = _serialize_buffer(self.ctx, buffer_desc)
+            response["requested_range"] = {"offset": int(offset), "size": int(size)}
+            response["returned_size"] = len(data)
+            response["data_base64"] = base64.b64encode(data).decode("ascii")
+            response["data_hex_preview"] = data[:64].hex(" ")
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return response
+
+    def _save_texture_to_file(self, texture_id, output_path, mip_level, array_slice):
+        self._ensure_capture_loaded()
+        self._ensure_final_event()
+        response = {
+            "texture_id": texture_id,
+            "output_path": os.path.abspath(output_path),
+            "mip_level": int(mip_level),
+            "array_slice": int(array_slice),
+        }
+
+        def callback(controller):
+            texture = self._find_texture_by_id(texture_id)
+            self._validate_texture_request(texture, mip_level, array_slice, 0)
+            extension = os.path.splitext(output_path)[1].lower()
+            file_type_map = {
+                ".dds": "DDS",
+                ".hdr": "HDR",
+                ".jpeg": "JPG",
+                ".jpg": "JPG",
+                ".png": "PNG",
+            }
+            file_type_name = file_type_map.get(extension, "")
+            if not file_type_name or rd is None or not hasattr(rd.FileType, file_type_name):
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "unsupported_export_type",
+                            "message": "The requested output_path extension is not supported for texture export.",
+                            "details": {"output_path": output_path},
+                        }
+                    )
+                )
+            directory = os.path.dirname(os.path.abspath(output_path))
+            if directory:
+                os.makedirs(directory, exist_ok=True)
+
+            texsave = rd.TextureSave()
+            texsave.resourceId = texture.resourceId
+            texsave.mip = int(mip_level)
+            texsave.slice.sliceIndex = int(array_slice)
+            texsave.destType = getattr(rd.FileType, file_type_name)
+            controller.SaveTexture(texsave, os.path.abspath(output_path))
+
+            if not os.path.isfile(os.path.abspath(output_path)):
+                raise RuntimeError(
+                    json.dumps(
+                        {
+                            "code": "replay_failure",
+                            "message": "RenderDoc did not create the requested texture export file.",
+                            "details": {"output_path": os.path.abspath(output_path)},
+                        }
+                    )
+                )
+
+            response["texture"] = _serialize_texture(self.ctx, texture)
+            response["saved"] = True
+            response["file_type"] = file_type_name
+            response["file_size"] = int(os.path.getsize(os.path.abspath(output_path)))
+
+        self.ctx.Replay().BlockInvoke(callback)
+        return response
+
     def _list_resources(self, kind, name_filter):
         self._ensure_capture_loaded()
         name_filter_lower = name_filter.lower() if name_filter else None
@@ -545,6 +1121,10 @@ class BridgeClient(object):
             )
         if method == "get_pass_details":
             return self._get_pass_details(params.get("pass_id", ""))
+        if method == "get_timing_data":
+            return self._get_timing_data(params.get("pass_id", ""))
+        if method == "get_performance_hotspots":
+            return self._get_performance_hotspots()
         if method == "get_action_details":
             return self._get_action_details(int(params.get("event_id", 0)))
         if method == "get_pipeline_state":
@@ -557,6 +1137,48 @@ class BridgeClient(object):
             )
         if method == "list_resources":
             return self._list_resources(params.get("kind", "all"), params.get("name_filter"))
+        if method == "get_pixel_history":
+            return self._get_pixel_history(
+                params.get("texture_id", ""),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            )
+        if method == "debug_pixel":
+            return self._debug_pixel(
+                params.get("texture_id", ""),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            )
+        if method == "get_texture_data":
+            return self._get_texture_data(
+                params.get("texture_id", ""),
+                int(params.get("mip_level", 0)),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                int(params.get("width", 0)),
+                int(params.get("height", 0)),
+                int(params.get("array_slice", 0)),
+                int(params.get("sample", 0)),
+            )
+        if method == "get_buffer_data":
+            return self._get_buffer_data(
+                params.get("buffer_id", ""),
+                int(params.get("offset", 0)),
+                int(params.get("size", 0)),
+            )
+        if method == "save_texture_to_file":
+            return self._save_texture_to_file(
+                params.get("texture_id", ""),
+                params.get("output_path", ""),
+                int(params.get("mip_level", 0)),
+                int(params.get("array_slice", 0)),
+            )
         if method == "close_capture":
             if self.ctx.IsCaptureLoaded():
                 self._clear_analysis_cache()

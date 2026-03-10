@@ -4,7 +4,15 @@ from typing import Any
 
 from renderdoc_mcp.bridge import QRenderDocBridge
 from renderdoc_mcp.errors import RenderDocMCPError
-from renderdoc_mcp.services import ActionQueries, CaptureQueries, PassQueries, ResourceQueries, ServiceContext
+from renderdoc_mcp.services import (
+    ActionQueries,
+    CaptureQueries,
+    PerformanceQueries,
+    PassQueries,
+    PixelQueries,
+    ResourceQueries,
+    ServiceContext,
+)
 
 
 class RenderDocService:
@@ -13,6 +21,8 @@ class RenderDocService:
         self._captures = CaptureQueries(self._context)
         self._actions = ActionQueries(self._context)
         self._passes = PassQueries(self._context)
+        self._performance = PerformanceQueries(self._context)
+        self._pixels = PixelQueries(self._context)
         self._resources = ResourceQueries(self._context)
 
     def get_capture_summary(self, capture_path: str) -> dict[str, Any]:
@@ -56,6 +66,12 @@ class RenderDocService:
     def get_pass_details(self, capture_path: str, pass_id: str) -> dict[str, Any]:
         return self._passes.get_pass_details(capture_path, pass_id)
 
+    def get_timing_data(self, capture_path: str, pass_id: str) -> dict[str, Any]:
+        return self._performance.get_timing_data(capture_path, pass_id)
+
+    def get_performance_hotspots(self, capture_path: str) -> dict[str, Any]:
+        return self._performance.get_performance_hotspots(capture_path)
+
     def get_action_details(self, capture_path: str, event_id: int) -> dict[str, Any]:
         return self._actions.get_action_details(capture_path, event_id)
 
@@ -73,6 +89,89 @@ class RenderDocService:
 
     def list_resources(self, capture_path: str, kind: str = "all", name_filter: str | None = None) -> dict[str, Any]:
         return self._resources.list_resources(capture_path, kind=kind, name_filter=name_filter)
+
+    def get_pixel_history(
+        self,
+        capture_path: str,
+        texture_id: str,
+        x: int,
+        y: int,
+        mip_level: int | None = 0,
+        array_slice: int | None = 0,
+        sample: int | None = 0,
+    ) -> dict[str, Any]:
+        return self._pixels.get_pixel_history(
+            capture_path,
+            texture_id,
+            x,
+            y,
+            mip_level=mip_level,
+            array_slice=array_slice,
+            sample=sample,
+        )
+
+    def debug_pixel(
+        self,
+        capture_path: str,
+        texture_id: str,
+        x: int,
+        y: int,
+        mip_level: int | None = 0,
+        array_slice: int | None = 0,
+        sample: int | None = 0,
+    ) -> dict[str, Any]:
+        return self._pixels.debug_pixel(
+            capture_path,
+            texture_id,
+            x,
+            y,
+            mip_level=mip_level,
+            array_slice=array_slice,
+            sample=sample,
+        )
+
+    def get_texture_data(
+        self,
+        capture_path: str,
+        texture_id: str,
+        mip_level: int,
+        x: int,
+        y: int,
+        width: int,
+        height: int,
+        array_slice: int = 0,
+        sample: int = 0,
+    ) -> dict[str, Any]:
+        return self._resources.get_texture_data(
+            capture_path,
+            texture_id,
+            mip_level,
+            x,
+            y,
+            width,
+            height,
+            array_slice=array_slice,
+            sample=sample,
+        )
+
+    def get_buffer_data(self, capture_path: str, buffer_id: str, offset: int, size: int) -> dict[str, Any]:
+        return self._resources.get_buffer_data(capture_path, buffer_id, offset, size)
+
+    def save_texture_to_file(
+        self,
+        capture_path: str,
+        texture_id: str,
+        output_path: str,
+        mip_level: int = 0,
+        array_slice: int = 0,
+    ) -> dict[str, Any]:
+        return self._resources.save_texture_to_file(
+            capture_path,
+            texture_id,
+            output_path,
+            mip_level=mip_level,
+            array_slice=array_slice,
+        )
 
     def recent_captures_resource(self) -> dict[str, Any]:
         return self._captures.recent_captures_resource()

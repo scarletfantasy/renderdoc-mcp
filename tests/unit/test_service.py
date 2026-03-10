@@ -25,6 +25,8 @@ class DummyBridge:
             return {"passes": [], "count": 0, "matched_count": 0, "returned_count": 0, "limit": 100}
         if method == "get_pass_details":
             return {"pass_id": "pass:1-2"}
+        if method == "get_buffer_data":
+            return {"returned_size": 4, "data_base64": "AAAAAA=="}
         return {"ok": True}
 
 
@@ -176,3 +178,179 @@ def test_tool_wraps_domain_errors(tmp_path: Path) -> None:
     response = service._error_response(str(capture_path), ReplayFailureError("boom"), "failed")
 
     assert response["error"]["message"] == "boom"
+
+
+def test_get_timing_data_uses_bridge(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_timing_data(str(capture_path), " pass:1-2 ")
+
+    assert response["error"] is None
+    assert bridge.calls == [("get_timing_data", {"pass_id": "pass:1-2"})]
+
+
+def test_get_timing_data_requires_non_empty_pass_id(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.get_timing_data(str(capture_path), "null")
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
+def test_get_performance_hotspots_uses_bridge(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_performance_hotspots(str(capture_path))
+
+    assert response["error"] is None
+    assert bridge.calls == [("get_performance_hotspots", {})]
+
+
+def test_get_pixel_history_normalizes_default_subresource_inputs(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_pixel_history(str(capture_path), texture_id=" tex123 ", x="10", y="20")
+
+    assert response["error"] is None
+    assert bridge.calls == [
+        (
+            "get_pixel_history",
+            {"texture_id": "tex123", "x": 10, "y": 20, "mip_level": 0, "array_slice": 0, "sample": 0},
+        )
+    ]
+
+
+def test_debug_pixel_rejects_negative_coordinates(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.debug_pixel(str(capture_path), texture_id="tex123", x=-1, y=4)
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
+def test_get_texture_data_validates_preview_limits(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.get_texture_data(
+        str(capture_path),
+        texture_id="tex123",
+        mip_level=0,
+        x=0,
+        y=0,
+        width=65,
+        height=1,
+    )
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
+def test_get_texture_data_uses_bridge(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_texture_data(
+        str(capture_path),
+        texture_id="tex123",
+        mip_level="1",
+        x="2",
+        y="3",
+        width="4",
+        height="5",
+        array_slice="6",
+        sample="7",
+    )
+
+    assert response["error"] is None
+    assert bridge.calls == [
+        (
+            "get_texture_data",
+            {
+                "texture_id": "tex123",
+                "mip_level": 1,
+                "x": 2,
+                "y": 3,
+                "width": 4,
+                "height": 5,
+                "array_slice": 6,
+                "sample": 7,
+            },
+        )
+    ]
+
+
+def test_get_buffer_data_rejects_large_reads(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.get_buffer_data(str(capture_path), buffer_id="buf123", offset=0, size=70000)
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
+def test_get_buffer_data_uses_bridge(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.get_buffer_data(str(capture_path), buffer_id=" buf123 ", offset="16", size="32")
+
+    assert response["error"] is None
+    assert bridge.calls == [("get_buffer_data", {"buffer_id": "buf123", "offset": 16, "size": 32})]
+    assert response["result"]["data_hex_preview"] == "00 00 00 00"
+
+
+def test_save_texture_to_file_rejects_unknown_extension(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    service = RenderDocService(bridge=DummyBridge())
+    response = service.save_texture_to_file(str(capture_path), texture_id="tex123", output_path="out.bmp")
+
+    assert response["result"] is None
+    assert response["error"]["code"] == "replay_failure"
+
+
+def test_save_texture_to_file_uses_bridge(tmp_path: Path) -> None:
+    capture_path = tmp_path / "sample.rdc"
+    capture_path.write_text("x", encoding="utf-8")
+
+    bridge = DummyBridge()
+    service = RenderDocService(bridge=bridge)
+    response = service.save_texture_to_file(
+        str(capture_path),
+        texture_id=" tex123 ",
+        output_path=" render.png ",
+        mip_level="2",
+        array_slice="3",
+    )
+
+    assert response["error"] is None
+    assert bridge.calls == [
+        (
+            "save_texture_to_file",
+            {"texture_id": "tex123", "output_path": "render.png", "mip_level": 2, "array_slice": 3},
+        )
+    ]

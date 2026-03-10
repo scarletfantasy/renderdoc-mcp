@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from pathlib import Path
 
 import anyio
@@ -46,10 +47,17 @@ def test_stdio_tools_and_resources() -> None:
                     "renderdoc_list_actions",
                     "renderdoc_list_passes",
                     "renderdoc_get_pass_details",
+                    "renderdoc_get_timing_data",
+                    "renderdoc_get_performance_hotspots",
                     "renderdoc_get_action_details",
                     "renderdoc_get_pipeline_state",
                     "renderdoc_get_shader_code",
                     "renderdoc_list_resources",
+                    "renderdoc_get_pixel_history",
+                    "renderdoc_debug_pixel",
+                    "renderdoc_get_texture_data",
+                    "renderdoc_get_buffer_data",
+                    "renderdoc_save_texture_to_file",
                 }.issubset(tool_names)
 
                 summary = await session.call_tool("renderdoc_get_capture_summary", {"capture_path": capture_path})
@@ -99,6 +107,20 @@ def test_stdio_tools_and_resources() -> None:
                 )
                 assert not pass_details.isError
                 assert pass_details.structuredContent["result"]["pass_id"] == first_pass_id
+
+                timing = await session.call_tool(
+                    "renderdoc_get_timing_data",
+                    {"capture_path": capture_path, "pass_id": first_pass_id},
+                )
+                assert not timing.isError
+                assert timing.structuredContent["result"]["pass"]["pass_id"] == first_pass_id
+
+                hotspots = await session.call_tool(
+                    "renderdoc_get_performance_hotspots",
+                    {"capture_path": capture_path},
+                )
+                assert not hotspots.isError
+                assert "basis" in hotspots.structuredContent["result"]
 
                 first_event = action_tree[0]["event_id"]
                 details = await session.call_tool(
@@ -158,6 +180,85 @@ def test_stdio_tools_and_resources() -> None:
                 )
                 assert not resources.isError
                 assert resources.structuredContent["result"]["count"] > 0
+
+                textures = resources.structuredContent["result"]["textures"]
+                buffers = resources.structuredContent["result"]["buffers"]
+
+                first_texture = next(
+                    (
+                        item
+                        for item in textures
+                        if item["resource_id"] and item["width"] > 0 and item["height"] > 0
+                    ),
+                    None,
+                )
+                if first_texture is not None:
+                    pixel_history = await session.call_tool(
+                        "renderdoc_get_pixel_history",
+                        {
+                            "capture_path": capture_path,
+                            "texture_id": first_texture["resource_id"],
+                            "x": 0,
+                            "y": 0,
+                        },
+                    )
+                    assert not pixel_history.isError
+                    assert pixel_history.structuredContent["result"]["texture"]["resource_id"] == first_texture["resource_id"]
+
+                    pixel_debug = await session.call_tool(
+                        "renderdoc_debug_pixel",
+                        {
+                            "capture_path": capture_path,
+                            "texture_id": first_texture["resource_id"],
+                            "x": 0,
+                            "y": 0,
+                        },
+                    )
+                    assert not pixel_debug.isError
+                    assert pixel_debug.structuredContent["result"]["texture"]["resource_id"] == first_texture["resource_id"]
+
+                    texture_preview = await session.call_tool(
+                        "renderdoc_get_texture_data",
+                        {
+                            "capture_path": capture_path,
+                            "texture_id": first_texture["resource_id"],
+                            "mip_level": 0,
+                            "x": 0,
+                            "y": 0,
+                            "width": min(4, first_texture["width"]),
+                            "height": min(4, first_texture["height"]),
+                        },
+                    )
+                    assert not texture_preview.isError
+                    assert texture_preview.structuredContent["result"]["texture"]["resource_id"] == first_texture["resource_id"]
+
+                    with tempfile.TemporaryDirectory() as temp_dir:
+                        output_path = str(Path(temp_dir) / "texture.png")
+                        saved_texture = await session.call_tool(
+                            "renderdoc_save_texture_to_file",
+                            {
+                                "capture_path": capture_path,
+                                "texture_id": first_texture["resource_id"],
+                                "output_path": output_path,
+                            },
+                        )
+                        assert not saved_texture.isError
+                        assert Path(output_path).is_file()
+
+                first_buffer = next((item for item in buffers if item["resource_id"] and item["byte_size"] > 0), None)
+                if first_buffer is not None:
+                    buffer_size = min(32, first_buffer["byte_size"])
+                    buffer_data = await session.call_tool(
+                        "renderdoc_get_buffer_data",
+                        {
+                            "capture_path": capture_path,
+                            "buffer_id": first_buffer["resource_id"],
+                            "offset": 0,
+                            "size": buffer_size,
+                        },
+                    )
+                    assert not buffer_data.isError
+                    assert buffer_data.structuredContent["result"]["buffer"]["resource_id"] == first_buffer["resource_id"]
 
                 resource_contents = await session.read_resource("renderdoc://recent-captures")
                 assert resource_contents.contents

@@ -18,6 +18,7 @@ DEFAULT_ACTION_PAGE_LIMIT = 100
 DEFAULT_PASS_PAGE_LIMIT = 100
 MAX_PAGE_LIMIT = 1000
 TOP_PASS_RANKING_LIMIT = 5
+HOTSPOT_LIMIT = 10
 
 _TAIL_CATEGORIES = set(["setup", "copy_resolve", "ui_overlay", "presentation"])
 _GPU_WORK_FLAGS = set(["draw", "dispatch", "copy", "resolve", "clear"])
@@ -211,6 +212,117 @@ def list_passes(analysis_cache, cursor=None, limit=None, category_filter=None, n
 
 def get_pass_details(analysis_cache, pass_id):
     return analysis_cache["pass_index"].get(pass_id)
+
+
+def build_timing_result(analysis_cache, pass_id, timing_payload):
+    pass_payload = get_pass_details(analysis_cache, pass_id)
+    if pass_payload is None:
+        return None
+
+    available = bool(timing_payload.get("timing_available"))
+    counter_name = timing_payload.get("counter_name", "EventGPUDuration")
+    result = {
+        "pass": _pass_summary(pass_payload),
+        "timing_available": available,
+        "basis": "gpu_timing" if available else "unavailable",
+        "counter_name": counter_name,
+        "total_gpu_time_ms": None,
+        "timed_event_count": 0,
+        "events": [],
+    }
+
+    if not available:
+        result["timing_unavailable_reason"] = timing_payload.get(
+            "reason",
+            "GPU duration counters are unavailable for this capture or replay device.",
+        )
+        return result
+
+    action_index = {}
+    _index_action_nodes(analysis_cache["action_tree"], action_index)
+    start_event_id = int(pass_payload["event_range"]["start_event_id"])
+    end_event_id = int(pass_payload["event_range"]["end_event_id"])
+    events = []
+    total_gpu_time_ms = 0.0
+
+    for item in timing_payload.get("rows", []):
+        event_id = int(item["event_id"])
+        if event_id < start_event_id or event_id > end_event_id:
+            continue
+        event_entry = _timed_event_entry(item, action_index.get(event_id))
+        events.append(event_entry)
+        total_gpu_time_ms += event_entry["gpu_time_ms"]
+
+    events = sorted(events, key=lambda item: (item["event_id"], item["name"]))
+    result["events"] = events
+    result["timed_event_count"] = len(events)
+    result["total_gpu_time_ms"] = round(total_gpu_time_ms, 6)
+    return result
+
+
+def build_performance_hotspots(analysis_cache, timing_payload, limit=HOTSPOT_LIMIT):
+    limit = int(limit or HOTSPOT_LIMIT)
+    action_index = {}
+    _index_action_nodes(analysis_cache["action_tree"], action_index)
+
+    available = bool(timing_payload.get("timing_available"))
+    result = {
+        "timing_available": available,
+        "basis": "gpu_timing" if available else "heuristic",
+        "counter_name": timing_payload.get("counter_name", "EventGPUDuration"),
+        "top_passes": [],
+        "top_events": [],
+    }
+
+    if available:
+        pass_rankings = []
+        for pass_payload in analysis_cache["passes"]:
+            start_event_id = int(pass_payload["event_range"]["start_event_id"])
+            end_event_id = int(pass_payload["event_range"]["end_event_id"])
+            rows = [
+                item
+                for item in timing_payload.get("rows", [])
+                if start_event_id <= int(item["event_id"]) <= end_event_id
+            ]
+            if not rows:
+                continue
+
+            total_gpu_time_ms = round(sum(float(item["gpu_time_ms"]) for item in rows), 6)
+            pass_rankings.append(
+                {
+                    "metric_name": "gpu_time_ms",
+                    "metric_value": total_gpu_time_ms,
+                    "gpu_time_ms": total_gpu_time_ms,
+                    "timed_event_count": len(rows),
+                    **_pass_summary(pass_payload),
+                }
+            )
+
+        result["top_passes"] = sorted(
+            pass_rankings,
+            key=lambda item: (-item["gpu_time_ms"], item["event_range"]["start_event_id"]),
+        )[:limit]
+
+        event_rankings = [_timed_event_entry(item, action_index.get(int(item["event_id"]))) for item in timing_payload.get("rows", [])]
+        result["top_events"] = sorted(
+            event_rankings,
+            key=lambda item: (-item["gpu_time_ms"], item["event_id"]),
+        )[:limit]
+        return result
+
+    result["fallback_explanation"] = timing_payload.get(
+        "reason",
+        "GPU duration counters are unavailable, so hotspots were ranked with draw, dispatch, copy, and clear heuristics.",
+    )
+    result["top_passes"] = sorted(
+        [_heuristic_pass_entry(item) for item in analysis_cache["passes"]],
+        key=lambda item: (-item["heuristic_score"], item["event_range"]["start_event_id"]),
+    )[:limit]
+    result["top_events"] = sorted(
+        _heuristic_event_entries(analysis_cache["action_tree"]),
+        key=lambda item: (-item["heuristic_score"], item["event_id"]),
+    )[:limit]
+    return result
 
 
 def pass_id_from_range(start_event_id, end_event_id):
@@ -622,6 +734,100 @@ def _contains_hint(text, hints):
         if hint in text:
             return True
     return False
+
+
+def _index_action_nodes(nodes, output):
+    for node in nodes:
+        output[int(node["event_id"])] = node
+        _index_action_nodes(node.get("children", []), output)
+
+
+def _timed_event_entry(item, node):
+    payload = {
+        "event_id": int(item["event_id"]),
+        "name": node["name"] if node is not None else "Event {0}".format(int(item["event_id"])),
+        "flags": list(node.get("flags", [])) if node is not None else [],
+        "parent_event_id": node.get("parent_event_id") if node is not None else None,
+        "depth": int(node.get("_analysis", {}).get("depth", node.get("depth", 0))) if node is not None else 0,
+        "metric_name": "gpu_time_ms",
+        "metric_value": round(float(item["gpu_time_ms"]), 6),
+        "gpu_time_ms": round(float(item["gpu_time_ms"]), 6),
+    }
+    return payload
+
+
+def _heuristic_pass_entry(pass_payload):
+    heuristic_score = round(float(_pass_heuristic_score(pass_payload)), 6)
+    return {
+        "metric_name": "heuristic_score",
+        "metric_value": heuristic_score,
+        "heuristic_score": heuristic_score,
+        **_pass_summary(pass_payload),
+    }
+
+
+def _heuristic_event_entries(nodes):
+    payload = []
+    for node in nodes:
+        heuristic_score = _action_heuristic_score(node)
+        if heuristic_score > 0:
+            payload.append(
+                {
+                    "event_id": int(node["event_id"]),
+                    "name": node["name"],
+                    "flags": list(node.get("flags", [])),
+                    "parent_event_id": node.get("parent_event_id"),
+                    "depth": int(node.get("_analysis", {}).get("depth", node.get("depth", 0))),
+                    "metric_name": "heuristic_score",
+                    "metric_value": round(float(heuristic_score), 6),
+                    "heuristic_score": round(float(heuristic_score), 6),
+                }
+            )
+        payload.extend(_heuristic_event_entries(node.get("children", [])))
+    return payload
+
+
+def _pass_heuristic_score(pass_payload):
+    stats = pass_payload["stats"]
+    return (
+        int(stats.get("draw_calls", 0)) * 1000000
+        + int(stats.get("dispatches", 0)) * 500000
+        + int(stats.get("copies", 0)) * 10000
+        + int(stats.get("resolves", 0)) * 10000
+        + int(stats.get("clears", 0)) * 5000
+        + int(stats.get("total_actions", 0))
+    )
+
+
+def _action_heuristic_score(node):
+    flags = set(node.get("flags", []))
+    if "draw" in flags:
+        return max(1, int(node.get("num_indices", 0))) * max(1, int(node.get("num_instances", 1)))
+    if "dispatch" in flags:
+        dispatch_threads = _positive_product(node.get("dispatch_threads_dimension", []))
+        if dispatch_threads > 0:
+            return dispatch_threads
+        dispatch_groups = _positive_product(node.get("dispatch_dimension", []))
+        if dispatch_groups > 0:
+            return dispatch_groups
+        return 1
+    if "copy" in flags or "resolve" in flags:
+        return 1000
+    if "clear" in flags:
+        return 500
+    return 0
+
+
+def _positive_product(values):
+    payload = 1
+    saw_value = False
+    for value in values:
+        integer = int(value)
+        if integer <= 0:
+            continue
+        payload *= integer
+        saw_value = True
+    return payload if saw_value else 0
 
 
 def _lower(value):

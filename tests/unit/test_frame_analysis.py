@@ -14,6 +14,10 @@ def _action(
     outputs: list[dict[str, str]] | None = None,
     depth_output: dict[str, str] | None = None,
     children: list[dict] | None = None,
+    num_indices: int = 0,
+    num_instances: int = 1,
+    dispatch_dimension: list[int] | None = None,
+    dispatch_threads_dimension: list[int] | None = None,
 ) -> dict:
     payload = {
         "event_id": event_id,
@@ -23,10 +27,10 @@ def _action(
         "flags": list(flags or []),
         "child_count": 0,
         "is_fake_marker": False,
-        "num_indices": 0,
-        "num_instances": 1,
-        "dispatch_dimension": [0, 0, 0],
-        "dispatch_threads_dimension": [0, 0, 0],
+        "num_indices": num_indices,
+        "num_instances": num_instances,
+        "dispatch_dimension": list(dispatch_dimension or [0, 0, 0]),
+        "dispatch_threads_dimension": list(dispatch_threads_dimension or [0, 0, 0]),
         "outputs": list(outputs or []),
         "depth_output": depth_output or {"resource_id": "", "resource_name": ""},
         "parent_event_id": None,
@@ -198,3 +202,125 @@ def test_analysis_cache_reuses_matching_keys_and_invalidates_old_entries() -> No
     cache.store(second_key, {"value": 2})
     assert cache.get(first_key) is None
     assert cache.get(second_key) == {"value": 2}
+
+
+def test_build_timing_result_aggregates_event_timings_for_a_pass() -> None:
+    nodes = [
+        _action(
+            100,
+            "BasePass",
+            ["push_marker"],
+            children=[
+                _action(101, "Depth", ["draw"], num_indices=100),
+                _action(102, "Color", ["draw"], num_indices=200),
+            ],
+        ),
+        _action(200, "Present", ["draw"], outputs=[_resource("Backbuffer")], num_indices=3),
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.build_timing_result(
+        analysis,
+        "pass:100-102",
+        {
+            "timing_available": True,
+            "counter_name": "EventGPUDuration",
+            "rows": [
+                {"event_id": 101, "gpu_time_ms": 0.25},
+                {"event_id": 102, "gpu_time_ms": 0.75},
+                {"event_id": 200, "gpu_time_ms": 1.5},
+            ],
+        },
+    )
+
+    assert result is not None
+    assert result["timing_available"] is True
+    assert result["basis"] == "gpu_timing"
+    assert result["total_gpu_time_ms"] == 1.0
+    assert result["timed_event_count"] == 2
+    assert [item["event_id"] for item in result["events"]] == [101, 102]
+
+
+def test_build_timing_result_reports_unavailable_timing() -> None:
+    nodes = [_action(10, "Setup", ["push_marker"], children=[_action(11, "Draw", ["draw"])])]
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.build_timing_result(
+        analysis,
+        "pass:10-11",
+        {"timing_available": False, "counter_name": "EventGPUDuration", "rows": [], "reason": "unsupported"},
+    )
+
+    assert result is not None
+    assert result["timing_available"] is False
+    assert result["basis"] == "unavailable"
+    assert result["total_gpu_time_ms"] is None
+    assert result["timing_unavailable_reason"] == "unsupported"
+
+
+def test_build_performance_hotspots_prefers_real_gpu_timing() -> None:
+    nodes = [
+        _action(
+            100,
+            "BasePass",
+            ["push_marker"],
+            children=[
+                _action(101, "Depth", ["draw"], num_indices=120),
+                _action(102, "Color", ["draw"], num_indices=240),
+            ],
+        ),
+        _action(
+            200,
+            "Lighting",
+            ["push_marker"],
+            children=[_action(201, "Dispatch", ["dispatch"], dispatch_dimension=[8, 8, 1])],
+        ),
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.build_performance_hotspots(
+        analysis,
+        {
+            "timing_available": True,
+            "counter_name": "EventGPUDuration",
+            "rows": [
+                {"event_id": 101, "gpu_time_ms": 0.5},
+                {"event_id": 102, "gpu_time_ms": 1.25},
+                {"event_id": 201, "gpu_time_ms": 0.75},
+            ],
+        },
+    )
+
+    assert result["timing_available"] is True
+    assert result["basis"] == "gpu_timing"
+    assert result["top_passes"][0]["name"] == "BasePass"
+    assert result["top_passes"][0]["gpu_time_ms"] == 1.75
+    assert result["top_events"][0]["event_id"] == 102
+
+
+def test_build_performance_hotspots_falls_back_to_heuristics() -> None:
+    nodes = [
+        _action(
+            100,
+            "BasePass",
+            ["push_marker"],
+            children=[_action(101, "Color", ["draw"], num_indices=240, num_instances=2)],
+        ),
+        _action(
+            200,
+            "Compute",
+            ["push_marker"],
+            children=[_action(201, "Dispatch", ["dispatch"], dispatch_threads_dimension=[4, 4, 4])],
+        ),
+    ]
+
+    analysis = frame_analysis.build_frame_analysis(nodes, _metadata(nodes))
+    result = frame_analysis.build_performance_hotspots(
+        analysis,
+        {"timing_available": False, "counter_name": "EventGPUDuration", "rows": [], "reason": "unsupported"},
+    )
+
+    assert result["timing_available"] is False
+    assert result["basis"] == "heuristic"
+    assert result["fallback_explanation"] == "unsupported"
+    assert result["top_passes"][0]["name"] == "BasePass"
+    assert result["top_events"][0]["event_id"] == 101
