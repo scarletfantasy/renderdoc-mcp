@@ -41,6 +41,10 @@ This repository now exposes an AI-first v2 MCP surface:
 - `renderdoc_get_resource_summary`
 - `renderdoc_get_pixel_history`
 - `renderdoc_debug_pixel`
+- `renderdoc_start_pixel_shader_debug`
+- `renderdoc_continue_shader_debug`
+- `renderdoc_get_shader_debug_step`
+- `renderdoc_end_shader_debug`
 - `renderdoc_get_texture_data`
 - `renderdoc_get_buffer_data`
 - `renderdoc_save_texture_to_file`
@@ -56,6 +60,8 @@ renderdoc_open_capture(capture_path="C:\\captures\\frame.rdc")
 ```
 
 The response includes `capture_id`, `capture_path`, and a compact capture overview.
+
+`renderdoc_get_capture_overview` also reports capability flags such as `shader_debugging`, which indicates whether the active replay device can create RenderDoc shader debug traces for this capture.
 
 Use that `capture_id` for all follow-up tools:
 
@@ -237,6 +243,41 @@ renderdoc_debug_pixel(
 )
 ```
 
+`renderdoc_debug_pixel` remains a compact pixel-history summary. For actual RenderDoc pixel shader single-step debugging, use the session-based tools when `capabilities.shader_debugging` is `true`:
+
+```powershell
+renderdoc_start_pixel_shader_debug(
+  capture_id="<capture_id>",
+  event_id=1234,
+  x=512,
+  y=384,
+  state_limit=1
+)
+```
+
+```powershell
+renderdoc_continue_shader_debug(
+  capture_id="<capture_id>",
+  shader_debug_id="<shader_debug_id>",
+  state_limit=1
+)
+```
+
+```powershell
+renderdoc_get_shader_debug_step(
+  capture_id="<capture_id>",
+  shader_debug_id="<shader_debug_id>",
+  step_index=0
+)
+```
+
+```powershell
+renderdoc_end_shader_debug(
+  capture_id="<capture_id>",
+  shader_debug_id="<shader_debug_id>"
+)
+```
+
 ## Install
 
 ```powershell
@@ -344,6 +385,10 @@ uv run renderdoc-mcp
 - `renderdoc_get_resource_summary`
 - `renderdoc_get_pixel_history`
 - `renderdoc_debug_pixel`
+- `renderdoc_start_pixel_shader_debug`
+- `renderdoc_continue_shader_debug`
+- `renderdoc_get_shader_debug_step`
+- `renderdoc_end_shader_debug`
 - `renderdoc_get_texture_data`
 - `renderdoc_get_buffer_data`
 - `renderdoc_save_texture_to_file`
@@ -410,6 +455,16 @@ renderdoc_get_shader_code_chunk(
   stage="pixel",
   start_line=1,
   line_count=200
+)
+```
+
+```powershell
+renderdoc_start_pixel_shader_debug(
+  capture_id="<capture_id>",
+  event_id=1234,
+  x=512,
+  y=384,
+  state_limit=1
 )
 ```
 

@@ -34,7 +34,12 @@ class DummyBridge:
                 "resource_counts": {"textures": 1, "buffers": 1},
                 "root_pass_count": 1,
                 "action_root_count": 1,
-                "capabilities": {"timing_data": True, "pixel_history": True, "shader_disassembly": True},
+                "capabilities": {
+                    "timing_data": True,
+                    "pixel_history": True,
+                    "shader_disassembly": True,
+                    "shader_debugging": True,
+                },
                 "meta": {},
             }
         if method == "get_analysis_worklist":
@@ -232,6 +237,31 @@ class DummyBridge:
             }
         if method == "debug_pixel":
             return {"texture": {"resource_id": payload["texture_id"]}, "draws": [], "meta": {}}
+        if method == "start_pixel_shader_debug":
+            return {
+                "shader_debug_id": "debug-1",
+                "event_id": payload["event_id"],
+                "states": [],
+                "returned_state_count": 0,
+                "meta": {"completed": False, "has_more": True},
+            }
+        if method == "continue_shader_debug":
+            return {
+                "shader_debug_id": payload["shader_debug_id"],
+                "states": [],
+                "returned_state_count": 0,
+                "meta": {"completed": True, "has_more": False},
+            }
+        if method == "get_shader_debug_step":
+            return {
+                "shader_debug_id": payload["shader_debug_id"],
+                "step_index": payload["step_index"],
+                "changes": [],
+                "returned_change_count": 0,
+                "meta": {"changes_truncated": False},
+            }
+        if method == "end_shader_debug":
+            return {"shader_debug_id": payload["shader_debug_id"], "closed": True, "meta": {}}
         if method == "get_texture_data":
             return {"texture": {"resource_id": payload["texture_id"]}, "pixels": [], "meta": {}}
         if method == "get_buffer_data":
@@ -348,6 +378,61 @@ def test_validation_errors_raise_domain_exceptions(tmp_path: Path) -> None:
         application.actions.renderdoc_list_pipeline_bindings(opened["capture_id"], event_id=7, binding_kind="bogus")
 
 
+def test_shader_debug_handlers_normalize_and_forward_arguments(tmp_path: Path) -> None:
+    application, created = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    started = application.resources.renderdoc_start_pixel_shader_debug(
+        opened["capture_id"],
+        event_id="42",
+        x="3",
+        y="4",
+        texture_id=" ResourceId::123 ",
+        sample="1",
+        primitive_id="2",
+        view="0",
+        state_limit="16",
+    )
+    continued = application.resources.renderdoc_continue_shader_debug(opened["capture_id"], " debug-1 ", state_limit="8")
+    step = application.resources.renderdoc_get_shader_debug_step(opened["capture_id"], "debug-1", step_index="7", change_limit="5")
+    ended = application.resources.renderdoc_end_shader_debug(opened["capture_id"], "debug-1")
+
+    assert started["shader_debug_id"] == "debug-1"
+    assert continued["shader_debug_id"] == "debug-1"
+    assert step["step_index"] == 7
+    assert ended["closed"] is True
+    assert created[0].calls[-4:] == [
+        (
+            "start_pixel_shader_debug",
+            {
+                "event_id": 42,
+                "x": 3,
+                "y": 4,
+                "texture_id": "ResourceId::123",
+                "sample": 1,
+                "primitive_id": 2,
+                "view": 0,
+                "state_limit": 16,
+            },
+        ),
+        ("continue_shader_debug", {"shader_debug_id": "debug-1", "state_limit": 8}),
+        ("get_shader_debug_step", {"shader_debug_id": "debug-1", "step_index": 7, "change_limit": 5}),
+        ("end_shader_debug", {"shader_debug_id": "debug-1"}),
+    ]
+
+
+def test_shader_debug_validation_errors_raise_domain_exceptions(tmp_path: Path) -> None:
+    application, _ = _application()
+    capture_path = _capture(tmp_path)
+    opened = application.captures.renderdoc_open_capture(capture_path)
+
+    with pytest.raises(ReplayFailureError):
+        application.resources.renderdoc_start_pixel_shader_debug(opened["capture_id"], event_id=7, x=0, y=0, state_limit=999)
+    with pytest.raises(ReplayFailureError):
+        application.resources.renderdoc_get_shader_debug_step(opened["capture_id"], "debug-1", step_index=0, change_limit=999)
+
+
 def test_registry_contains_new_breaking_api_surface() -> None:
     application, _ = _application()
     tool_names = {tool.name for tool in build_tool_registry(application)}
@@ -359,5 +444,9 @@ def test_registry_contains_new_breaking_api_surface() -> None:
         "renderdoc_get_analysis_worklist",
         "renderdoc_get_pipeline_overview",
         "renderdoc_get_shader_code_chunk",
+        "renderdoc_start_pixel_shader_debug",
+        "renderdoc_continue_shader_debug",
+        "renderdoc_get_shader_debug_step",
+        "renderdoc_end_shader_debug",
     }.issubset(tool_names)
     assert "renderdoc://capture/{capture_id}/overview" in resource_uris

@@ -109,6 +109,26 @@ def build_tool_registry(application: RenderDocApplication) -> list[ToolRegistrat
             application.resources.renderdoc_debug_pixel,
         ),
         ToolRegistration(
+            "renderdoc_start_pixel_shader_debug",
+            "Start a pixel shader debugging session for a draw event and pixel co-ordinate.",
+            application.resources.renderdoc_start_pixel_shader_debug,
+        ),
+        ToolRegistration(
+            "renderdoc_continue_shader_debug",
+            "Continue a shader debugging session and return the next compact batch of states.",
+            application.resources.renderdoc_continue_shader_debug,
+        ),
+        ToolRegistration(
+            "renderdoc_get_shader_debug_step",
+            "Return the detailed variable changes for a previously fetched shader debug step.",
+            application.resources.renderdoc_get_shader_debug_step,
+        ),
+        ToolRegistration(
+            "renderdoc_end_shader_debug",
+            "Close a shader debugging session and release the underlying RenderDoc trace.",
+            application.resources.renderdoc_end_shader_debug,
+        ),
+        ToolRegistration(
             "renderdoc_get_texture_data",
             "Return a bounded JSON-friendly texture preview grid for a selected region and subresource.",
             application.resources.renderdoc_get_texture_data,

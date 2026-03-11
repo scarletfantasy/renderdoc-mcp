@@ -66,6 +66,10 @@ def test_stdio_tools_and_resources() -> None:
                     "renderdoc_get_resource_summary",
                     "renderdoc_get_pixel_history",
                     "renderdoc_debug_pixel",
+                    "renderdoc_start_pixel_shader_debug",
+                    "renderdoc_continue_shader_debug",
+                    "renderdoc_get_shader_debug_step",
+                    "renderdoc_end_shader_debug",
                     "renderdoc_get_texture_data",
                     "renderdoc_get_buffer_data",
                     "renderdoc_save_texture_to_file",
@@ -138,6 +142,7 @@ def test_stdio_tools_and_resources() -> None:
                 assert root_actions.structuredContent["meta"]["page"]["limit"] == 50
 
                 chosen_event = None
+                chosen_draw_event = None
                 if root_action_rows:
                     first_action = root_action_rows[0]
                     if first_action["child_count"] > 0:
@@ -147,8 +152,11 @@ def test_stdio_tools_and_resources() -> None:
                         )
                         assert not child_actions.isError
                         for item in child_actions.structuredContent["actions"]:
-                            if set(item["flags"]).intersection({"draw", "dispatch"}):
+                            if "draw" in item["flags"] and chosen_draw_event is None:
+                                chosen_draw_event = item["event_id"]
+                            if chosen_event is None and set(item["flags"]).intersection({"draw", "dispatch"}):
                                 chosen_event = item["event_id"]
+                            if chosen_event is not None and chosen_draw_event is not None:
                                 break
                     if chosen_event is None:
                         probe_actions = await session.call_tool(
@@ -157,9 +165,14 @@ def test_stdio_tools_and_resources() -> None:
                         )
                         assert not probe_actions.isError
                         for item in probe_actions.structuredContent["actions"]:
-                            if "draw" in item["flags"] or "dispatch" in item["flags"]:
+                            if "draw" in item["flags"] and chosen_draw_event is None:
+                                chosen_draw_event = item["event_id"]
+                            if chosen_event is None and ("draw" in item["flags"] or "dispatch" in item["flags"]):
                                 chosen_event = item["event_id"]
+                            if chosen_event is not None and chosen_draw_event is not None:
                                 break
+                if chosen_event is None and chosen_draw_event is not None:
+                    chosen_event = chosen_draw_event
 
                 if chosen_event is not None:
                     action_summary = await session.call_tool(
@@ -209,6 +222,64 @@ def test_stdio_tools_and_resources() -> None:
                         )
                         assert not shader_chunk.isError
                         assert _size_bytes(shader_chunk.structuredContent) < 40 * 1024
+
+                    if overview_payload["capabilities"].get("shader_debugging") and chosen_draw_event is not None:
+                        shader_debug = await session.call_tool(
+                            "renderdoc_start_pixel_shader_debug",
+                            {
+                                "capture_id": capture_id,
+                                "event_id": chosen_draw_event,
+                                "x": 0,
+                                "y": 0,
+                                "state_limit": 1,
+                            },
+                        )
+                        if not shader_debug.isError:
+                            shader_debug_payload = shader_debug.structuredContent
+                            shader_debug_id = shader_debug_payload["shader_debug_id"]
+                            first_step_index = (
+                                shader_debug_payload["states"][0]["step_index"] if shader_debug_payload["states"] else None
+                            )
+
+                            if first_step_index is None and shader_debug_payload["meta"]["has_more"]:
+                                continued_debug = await session.call_tool(
+                                    "renderdoc_continue_shader_debug",
+                                    {
+                                        "capture_id": capture_id,
+                                        "shader_debug_id": shader_debug_id,
+                                        "state_limit": 1,
+                                    },
+                                )
+                                assert not continued_debug.isError
+                                continued_payload = continued_debug.structuredContent
+                                if continued_payload["states"]:
+                                    first_step_index = continued_payload["states"][0]["step_index"]
+
+                            if first_step_index is not None:
+                                shader_step = await session.call_tool(
+                                    "renderdoc_get_shader_debug_step",
+                                    {
+                                        "capture_id": capture_id,
+                                        "shader_debug_id": shader_debug_id,
+                                        "step_index": first_step_index,
+                                    },
+                                )
+                                assert not shader_step.isError
+
+                            end_debug = await session.call_tool(
+                                "renderdoc_end_shader_debug",
+                                {"capture_id": capture_id, "shader_debug_id": shader_debug_id},
+                            )
+                            assert not end_debug.isError
+                        else:
+                            assert any(
+                                code in str(shader_debug.content)
+                                for code in (
+                                    "shader_debug_trace_unavailable",
+                                    "shader_debugging_not_supported",
+                                    "shader_debug_requires_draw_event",
+                                )
+                            )
 
                 resources = await session.call_tool(
                     "renderdoc_list_resources",

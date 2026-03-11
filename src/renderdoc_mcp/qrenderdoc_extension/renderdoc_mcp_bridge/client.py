@@ -4,6 +4,7 @@ import os
 import threading
 import time
 import traceback
+import uuid
 
 try:
     import renderdoc as rd
@@ -235,6 +236,167 @@ def _serialize_pixel_value(value):
     return str(value)
 
 
+def _shader_debug_no_preference():
+    if rd is not None and hasattr(rd, "NoPreference"):
+        try:
+            return int(getattr(rd, "NoPreference"))
+        except Exception:
+            return getattr(rd, "NoPreference")
+    return -1
+
+
+def _shader_debug_selector_value(value):
+    normalized = int(value)
+    if normalized < 0:
+        return normalized & 0xFFFFFFFF
+    return normalized
+
+
+def _shader_debug_flag_names(value):
+    text = str(value or "").replace("ShaderEvents.", "").strip()
+    if not text or text in ("0", "None", "NoEvent"):
+        return []
+    return [part.strip() for part in text.split("|") if part.strip() and part.strip() not in ("0", "None", "NoEvent")]
+
+
+def _serialize_line_info(value):
+    if value is None:
+        return None
+
+    payload = {
+        "file_index": int(getattr(value, "fileIndex", -1)),
+        "line_start": int(getattr(value, "lineStart", 0)),
+        "line_end": int(getattr(value, "lineEnd", 0)),
+        "col_start": int(getattr(value, "colStart", 0)),
+        "col_end": int(getattr(value, "colEnd", 0)),
+        "disassembly_line": int(getattr(value, "disassemblyLine", 0)),
+    }
+    if payload == {
+        "file_index": -1,
+        "line_start": 0,
+        "line_end": 0,
+        "col_start": 0,
+        "col_end": 0,
+        "disassembly_line": 0,
+    }:
+        return None
+    return payload
+
+
+def _shader_value_candidates(type_name):
+    normalized = str(type_name or "").lower()
+    defaults = [
+        ("f32v", float),
+        ("f16v", float),
+        ("f64v", float),
+        ("s32v", int),
+        ("s16v", int),
+        ("s8v", int),
+        ("s64v", int),
+        ("u32v", int),
+        ("u16v", int),
+        ("u8v", int),
+        ("u64v", int),
+    ]
+    preferred = []
+    if "double" in normalized:
+        preferred = [("f64v", float), ("f32v", float), ("f16v", float)]
+    elif "float" in normalized or "half" in normalized:
+        preferred = [("f32v", float), ("f16v", float), ("f64v", float)]
+    elif "bool" in normalized:
+        preferred = [("u32v", int), ("u8v", int), ("s32v", int)]
+    elif "uint64" in normalized or "ulong" in normalized or "u64" in normalized:
+        preferred = [("u64v", int), ("u32v", int), ("u16v", int), ("u8v", int)]
+    elif "uint" in normalized or "ushort" in normalized or "uchar" in normalized or normalized.startswith("u"):
+        preferred = [("u32v", int), ("u16v", int), ("u8v", int), ("u64v", int)]
+    elif "int64" in normalized or "s64" in normalized or "slong" in normalized:
+        preferred = [("s64v", int), ("s32v", int), ("s16v", int), ("s8v", int)]
+    elif "int" in normalized or "sint" in normalized or "short" in normalized or "char" in normalized:
+        preferred = [("s32v", int), ("s16v", int), ("s8v", int), ("s64v", int)]
+
+    ordered = []
+    seen = set()
+    for attr, cast in preferred + defaults:
+        if attr in seen:
+            continue
+        ordered.append((attr, cast))
+        seen.add(attr)
+    return ordered
+
+
+def _serialize_shader_variable_value(variable):
+    if variable is None:
+        return None
+
+    shader_value = getattr(variable, "value", None)
+    if shader_value is None:
+        return None
+
+    rows = max(1, int(getattr(variable, "rows", 1) or 1))
+    columns = max(1, int(getattr(variable, "columns", 1) or 1))
+    component_count = rows * columns
+    fallback = None
+
+    for attr, cast in _shader_value_candidates(_enum_name(getattr(variable, "type", ""))):
+        try:
+            items = list(getattr(shader_value, attr, []) or [])
+        except Exception:
+            items = []
+        if not items:
+            continue
+        values = []
+        for item in items[:component_count]:
+            try:
+                values.append(cast(item))
+            except Exception:
+                values.append(0.0 if cast is float else 0)
+        if fallback is None:
+            fallback = values
+        if any(value != 0 for value in values):
+            return values[0] if len(values) == 1 else values
+
+    if fallback is None:
+        return None
+    return fallback[0] if len(fallback) == 1 else fallback
+
+
+def _serialize_shader_change(change):
+    before = getattr(change, "before", None)
+    after = getattr(change, "after", None)
+    variable = after if after is not None else before
+    if variable is None:
+        return {
+            "name": "",
+            "type": "",
+            "rows": 0,
+            "columns": 0,
+            "member_count": 0,
+            "before_value": None,
+            "after_value": None,
+        }
+
+    return {
+        "name": str(getattr(variable, "name", "") or ""),
+        "type": _enum_name(getattr(variable, "type", "")),
+        "rows": int(getattr(variable, "rows", 0)),
+        "columns": int(getattr(variable, "columns", 0)),
+        "member_count": len(_safe_list(getattr(variable, "members", []))),
+        "before_value": _serialize_shader_variable_value(before),
+        "after_value": _serialize_shader_variable_value(after),
+    }
+
+
+def _source_variable_names(mappings):
+    names = []
+    seen = set()
+    for mapping in _safe_list(mappings):
+        name = str(getattr(mapping, "name", "") or "")
+        if name and name not in seen:
+            names.append(name)
+            seen.add(name)
+    return names
+
+
 class BridgeClient(object):
     def __init__(self, ctx, renderdoc_version=""):
         self.ctx = ctx
@@ -246,6 +408,7 @@ class BridgeClient(object):
         self.analysis_cache = frame_analysis.AnalysisCache()
         self.timing_cache = frame_analysis.AnalysisCache()
         self.shader_code_cache = {}
+        self.shader_debug_sessions = {}
         self.handlers = self._build_handlers()
 
     def _build_handlers(self):
@@ -324,6 +487,26 @@ class BridgeClient(object):
                 int(params.get("array_slice", 0)),
                 int(params.get("sample", 0)),
             ),
+            "start_pixel_shader_debug": lambda params: self._start_pixel_shader_debug(
+                int(params.get("event_id", 0)),
+                int(params.get("x", 0)),
+                int(params.get("y", 0)),
+                params.get("texture_id"),
+                params.get("sample"),
+                params.get("primitive_id"),
+                params.get("view"),
+                int(params.get("state_limit", 32)),
+            ),
+            "continue_shader_debug": lambda params: self._continue_shader_debug(
+                params.get("shader_debug_id", ""),
+                int(params.get("state_limit", 32)),
+            ),
+            "get_shader_debug_step": lambda params: self._get_shader_debug_step(
+                params.get("shader_debug_id", ""),
+                int(params.get("step_index", 0)),
+                int(params.get("change_limit", 64)),
+            ),
+            "end_shader_debug": lambda params: self._end_shader_debug(params.get("shader_debug_id", "")),
             "get_texture_data": lambda params: self._get_texture_data(
                 params.get("texture_id", ""),
                 int(params.get("mip_level", 0)),
@@ -393,7 +576,8 @@ class BridgeClient(object):
     def stop(self):
         self.stop_event.set()
         if self.thread is not None:
-            self.thread.join(timeout=2.0)
+            if threading.current_thread() is not self.thread:
+                self.thread.join(timeout=2.0)
             self.thread = None
         if self.sock is not None:
             try:
@@ -401,9 +585,7 @@ class BridgeClient(object):
             except Exception:
                 pass
             self.sock = None
-        self.analysis_cache.clear()
-        self.timing_cache.clear()
-        self.shader_code_cache.clear()
+        self._clear_analysis_cache()
 
     def _send(self, message):
         self.sock.send_text(json.dumps(message, separators=(",", ":")) + "\n")
@@ -437,6 +619,21 @@ class BridgeClient(object):
 
         return result.get("value", {})
 
+    def _block_invoke_checked(self, callback):
+        callback_error = {}
+
+        def runner(controller):
+            try:
+                callback(controller)
+            except Exception as exc:
+                callback_error["exception"] = exc
+                callback_error["traceback"] = traceback.format_exc()
+                _log("Replay callback failed:\n{}".format(callback_error["traceback"]))
+
+        self.ctx.Replay().BlockInvoke(runner)
+        if "exception" in callback_error:
+            raise callback_error["exception"]
+
     def _ensure_capture_loaded(self):
         if not self.ctx.IsCaptureLoaded():
             raise BridgeError("replay_failure", "No capture is currently loaded in qrenderdoc.")
@@ -466,6 +663,147 @@ class BridgeClient(object):
         self.analysis_cache.clear()
         self.timing_cache.clear()
         self.shader_code_cache.clear()
+        self._clear_shader_debug_sessions()
+
+    def _clear_shader_debug_sessions(self):
+        if not self.shader_debug_sessions:
+            return
+
+        sessions = list(self.shader_debug_sessions.values())
+        self.shader_debug_sessions = {}
+
+        if not self.ctx.IsCaptureLoaded():
+            return
+
+        def callback(controller):
+            for session in sessions:
+                trace = session.get("trace")
+                if trace is None or not hasattr(controller, "FreeTrace"):
+                    continue
+                try:
+                    controller.FreeTrace(trace)
+                except Exception:
+                    pass
+
+        try:
+            self.ctx.Replay().BlockInvoke(callback)
+        except Exception:
+            pass
+
+    def _controller_shader_debugging_supported(self, controller):
+        try:
+            return bool(getattr(controller.GetAPIProperties(), "shaderDebugging", False))
+        except Exception:
+            return False
+
+    def _instruction_info_for_state(self, trace, state):
+        instruction_index = int(getattr(state, "nextInstruction", -1))
+        for info in _safe_list(getattr(trace, "instInfo", [])):
+            try:
+                if int(getattr(info, "instruction", -1)) == instruction_index:
+                    return info
+            except Exception:
+                continue
+
+        infos = _safe_list(getattr(trace, "instInfo", []))
+        if 0 <= instruction_index < len(infos):
+            return infos[instruction_index]
+        return None
+
+    def _serialize_shader_debug_state_summary(self, trace, state):
+        instruction_info = self._instruction_info_for_state(trace, state)
+        return {
+            "step_index": int(getattr(state, "stepIndex", 0)),
+            "next_instruction": int(getattr(state, "nextInstruction", 0)),
+            "flags": _shader_debug_flag_names(getattr(state, "flags", None)),
+            "line_info": _serialize_line_info(getattr(instruction_info, "lineInfo", None)),
+            "source_variable_names": _source_variable_names(getattr(instruction_info, "sourceVars", [])),
+            "change_count": len(_safe_list(getattr(state, "changes", []))),
+            "has_callstack": bool(_safe_list(getattr(state, "callstack", []))),
+        }
+
+    def _serialize_shader_debug_trace_summary(self, trace):
+        return {
+            "stage": _enum_name(getattr(trace, "stage", "Pixel")),
+            "instruction_count": len(_safe_list(getattr(trace, "instInfo", []))),
+            "input_count": len(_safe_list(getattr(trace, "inputs", []))),
+            "constant_block_count": len(_safe_list(getattr(trace, "constantBlocks", []))),
+            "read_only_resource_count": len(_safe_list(getattr(trace, "readOnlyResources", []))),
+            "read_write_resource_count": len(_safe_list(getattr(trace, "readWriteResources", []))),
+            "sampler_count": len(_safe_list(getattr(trace, "samplers", []))),
+            "source_variable_count": len(_safe_list(getattr(trace, "sourceVars", []))),
+        }
+
+    def _serialize_shader_debug_step_payload(self, session, state, change_limit):
+        instruction_info = self._instruction_info_for_state(session["trace"], state)
+        changes = _safe_list(getattr(state, "changes", []))
+        serialized_changes = [_serialize_shader_change(change) for change in changes[: max(1, int(change_limit or 1))]]
+        return {
+            "shader_debug_id": session["shader_debug_id"],
+            "event_id": session["event_id"],
+            "api": session["api"],
+            "action": dict(session["action"]),
+            "shader": dict(session["shader"]),
+            "target": dict(session["target"]),
+            "step_index": int(getattr(state, "stepIndex", 0)),
+            "next_instruction": int(getattr(state, "nextInstruction", 0)),
+            "flags": _shader_debug_flag_names(getattr(state, "flags", None)),
+            "line_info": _serialize_line_info(getattr(instruction_info, "lineInfo", None)),
+            "source_variable_names": _source_variable_names(getattr(instruction_info, "sourceVars", [])),
+            "has_callstack": bool(_safe_list(getattr(state, "callstack", []))),
+            "callstack": [str(item) for item in _safe_list(getattr(state, "callstack", []))],
+            "change_count": len(changes),
+            "returned_change_count": len(serialized_changes),
+            "changes": serialized_changes,
+            "meta": {"changes_truncated": len(serialized_changes) < len(changes)},
+        }
+
+    def _shader_debug_has_more(self, session):
+        return bool(session.get("pending_states")) or not bool(session.get("completed", False))
+
+    def _fill_shader_debug_pending_states(self, controller, session, limit):
+        desired_count = max(1, int(limit or 1))
+        while len(session["pending_states"]) < desired_count and not session["completed"]:
+            if not hasattr(controller, "ContinueDebug"):
+                raise BridgeError(
+                    "shader_debugging_not_supported",
+                    "RenderDoc did not expose ContinueDebug in this build.",
+                )
+
+            states = _safe_list(controller.ContinueDebug(session["debugger"]))
+            if not states:
+                session["completed"] = True
+                break
+
+            appended = 0
+            for state in states:
+                step_index = int(getattr(state, "stepIndex", -1))
+                if step_index in session["history_by_step"]:
+                    continue
+                session["history_by_step"][step_index] = state
+                session["history"].append(state)
+                session["pending_states"].append(state)
+                appended += 1
+
+            if appended == 0:
+                session["completed"] = True
+                break
+
+    def _consume_shader_debug_state_page(self, session, limit):
+        count = min(max(1, int(limit or 1)), len(session["pending_states"]))
+        raw_states = session["pending_states"][:count]
+        del session["pending_states"][:count]
+        return [self._serialize_shader_debug_state_summary(session["trace"], state) for state in raw_states]
+
+    def _get_shader_debug_session(self, shader_debug_id):
+        session = self.shader_debug_sessions.get(str(shader_debug_id or ""))
+        if session is None:
+            raise BridgeError(
+                "shader_debug_session_not_found",
+                "The supplied shader_debug_id does not exist or has already been closed.",
+                {"shader_debug_id": str(shader_debug_id or "")},
+            )
+        return session
 
     def _capture_cache_key(self):
         capture_path = self.ctx.GetCaptureFilename()
@@ -972,12 +1310,19 @@ class BridgeClient(object):
         overview = self._get_capture_summary()
         analysis = self._ensure_frame_analysis()
         timing_payload = self._ensure_timing_data()
+        shader_debugging = {"supported": False}
+
+        def callback(controller):
+            shader_debugging["supported"] = self._controller_shader_debugging_supported(controller)
+
+        self.ctx.Replay().BlockInvoke(callback)
         overview["root_pass_count"] = len(analysis.get("root_pass_ids", []))
         overview["action_root_count"] = len(analysis.get("root_action_ids", []))
         overview["capabilities"] = {
             "timing_data": bool(timing_payload.get("timing_available")),
             "pixel_history": True,
             "shader_disassembly": True,
+            "shader_debugging": bool(shader_debugging["supported"]),
         }
         return overview
 
@@ -1637,6 +1982,259 @@ class BridgeClient(object):
 
         self.ctx.Replay().BlockInvoke(callback)
         return payload
+
+    def _resolve_shader_debug_target(self, texture_id, state, action):
+        target = {
+            "texture_id": str(texture_id or ""),
+            "validated": False,
+            "slot_kind": "",
+            "slot_index": -1,
+        }
+        if not texture_id:
+            return target
+
+        expected = str(texture_id)
+        descriptors = []
+        for index, descriptor in enumerate(_safe_list(_call_method_variants(state, "GetOutputTargets", [()], default=[]))):
+            descriptors.append(("color", index, _serialize_descriptor(self.ctx, descriptor)))
+        descriptors.append(("depth", -1, _serialize_descriptor(self.ctx, _call_method_variants(state, "GetDepthTarget", [()], default=None))))
+        descriptors.append(
+            (
+                "depth_resolve",
+                -1,
+                _serialize_descriptor(self.ctx, _call_method_variants(state, "GetDepthResolveTarget", [()], default=None)),
+            )
+        )
+
+        for slot_kind, slot_index, descriptor in descriptors:
+            candidates = {
+                str(descriptor.get("resource_id", "") or ""),
+                str(descriptor.get("secondary_resource_id", "") or ""),
+                str(descriptor.get("view_id", "") or ""),
+            }
+            if expected in candidates:
+                target["validated"] = True
+                target["slot_kind"] = slot_kind
+                target["slot_index"] = int(slot_index)
+                return target
+
+        for index, resource_id in enumerate(_safe_list(getattr(action, "outputs", []))):
+            if _resource_id(resource_id) == expected:
+                target["validated"] = True
+                target["slot_kind"] = "color"
+                target["slot_index"] = int(index)
+                return target
+
+        if _resource_id(getattr(action, "depthOut", None)) == expected:
+            target["validated"] = True
+            target["slot_kind"] = "depth"
+            target["slot_index"] = -1
+            return target
+
+        raise BridgeError(
+            "shader_debug_target_mismatch",
+            "The supplied texture_id is not bound as an output target on the selected draw event.",
+            {"event_id": int(getattr(action, "eventId", 0)), "texture_id": expected},
+        )
+
+    def _release_shader_debug_session(self, controller, shader_debug_id):
+        session = self.shader_debug_sessions.pop(str(shader_debug_id or ""), None)
+        if session is None:
+            raise BridgeError(
+                "shader_debug_session_not_found",
+                "The supplied shader_debug_id does not exist or has already been closed.",
+                {"shader_debug_id": str(shader_debug_id or "")},
+            )
+
+        trace = session.get("trace")
+        if trace is not None and hasattr(controller, "FreeTrace"):
+            try:
+                controller.FreeTrace(trace)
+            except Exception:
+                pass
+        return session
+
+    def _start_pixel_shader_debug(self, event_id, x, y, texture_id, sample, primitive_id, view, state_limit):
+        self._ensure_capture_loaded()
+        action = self._set_event(event_id)
+        response = {"event_id": int(event_id)}
+
+        def callback(controller):
+            if not self._controller_shader_debugging_supported(controller):
+                raise BridgeError(
+                    "shader_debugging_not_supported",
+                    "The active replay device does not support shader debugging for this capture.",
+                    {"event_id": int(event_id)},
+                )
+            if "draw" not in _action_flags(action):
+                raise BridgeError(
+                    "shader_debug_requires_draw_event",
+                    "Pixel shader debugging requires a draw event.",
+                    {"event_id": int(event_id), "flags": _action_flags(action)},
+                )
+            if rd is None or not hasattr(rd, "DebugPixelInputs") or not hasattr(controller, "DebugPixel"):
+                raise BridgeError(
+                    "shader_debugging_not_supported",
+                    "RenderDoc did not expose pixel shader debugging APIs in this build.",
+                    {"event_id": int(event_id)},
+                )
+
+            state = _call_method_variants(controller, "GetPipelineState", [()], default=None)
+            if state is None:
+                raise BridgeError(
+                    "shader_debug_trace_unavailable",
+                    "RenderDoc did not expose pipeline state for the selected event.",
+                    {"event_id": int(event_id)},
+                )
+
+            pixel_stage = _shader_stage_from_name("pixel")
+            shader_payload = _serialize_shader_stage(self.ctx, state, pixel_stage) if pixel_stage is not None else None
+            if shader_payload is None:
+                raise BridgeError(
+                    "shader_debug_trace_unavailable",
+                    "No pixel shader is bound for the selected draw event.",
+                    {"event_id": int(event_id)},
+                )
+
+            target = self._resolve_shader_debug_target(texture_id, state, action)
+            inputs = rd.DebugPixelInputs()
+            no_preference = _shader_debug_no_preference()
+            sample_value = _shader_debug_selector_value(no_preference if sample is None else sample)
+            primitive_value = _shader_debug_selector_value(no_preference if primitive_id is None else primitive_id)
+            view_value = _shader_debug_selector_value(no_preference if view is None else view)
+            inputs.sample = sample_value
+            inputs.primitive = primitive_value
+            inputs.view = view_value
+
+            trace = None
+            try:
+                trace = controller.DebugPixel(int(x), int(y), inputs)
+            except TypeError:
+                trace = controller.DebugPixel(
+                    int(x),
+                    int(y),
+                    sample_value,
+                    primitive_value,
+                )
+
+            debugger = getattr(trace, "debugger", None)
+            if trace is None or debugger is None:
+                raise BridgeError(
+                    "shader_debug_trace_unavailable",
+                    "RenderDoc could not create a shader debug trace for the selected pixel.",
+                    {"event_id": int(event_id), "x": int(x), "y": int(y)},
+                )
+
+            shader_debug_id = uuid.uuid4().hex
+            session = {
+                "shader_debug_id": shader_debug_id,
+                "event_id": int(event_id),
+                "api": _api_name(controller),
+                "action": {
+                    "event_id": int(action.eventId),
+                    "name": action.GetName(controller.GetStructuredFile()) or action.customName or "Event {}".format(action.eventId),
+                    "flags": _action_flags(action),
+                },
+                "shader": {
+                    "stage": shader_payload.get("stage", "Pixel"),
+                    "shader_id": shader_payload.get("shader_id", ""),
+                    "shader_name": shader_payload.get("shader_name", ""),
+                    "entry_point": shader_payload.get("entry_point", ""),
+                },
+                "target": target,
+                "trace": trace,
+                "debugger": debugger,
+                "trace_summary": self._serialize_shader_debug_trace_summary(trace),
+                "history": [],
+                "history_by_step": {},
+                "pending_states": [],
+                "completed": False,
+            }
+
+            try:
+                self._fill_shader_debug_pending_states(controller, session, state_limit)
+            except Exception:
+                if hasattr(controller, "FreeTrace"):
+                    try:
+                        controller.FreeTrace(trace)
+                    except Exception:
+                        pass
+                raise
+
+            self.shader_debug_sessions[shader_debug_id] = session
+            states = self._consume_shader_debug_state_page(session, state_limit)
+            response.update(
+                {
+                    "shader_debug_id": shader_debug_id,
+                    "api": session["api"],
+                    "action": dict(session["action"]),
+                    "shader": dict(session["shader"]),
+                    "target": dict(session["target"]),
+                    "trace_summary": dict(session["trace_summary"]),
+                    "returned_state_count": len(states),
+                    "states": states,
+                    "meta": {
+                        "completed": bool(session["completed"]),
+                        "has_more": self._shader_debug_has_more(session),
+                    },
+                }
+            )
+
+        self._block_invoke_checked(callback)
+        return response
+
+    def _continue_shader_debug(self, shader_debug_id, state_limit):
+        self._ensure_capture_loaded()
+        session = self._get_shader_debug_session(shader_debug_id)
+        response = {"shader_debug_id": session["shader_debug_id"], "event_id": session["event_id"]}
+
+        def callback(controller):
+            self._fill_shader_debug_pending_states(controller, session, state_limit)
+            states = self._consume_shader_debug_state_page(session, state_limit)
+            response.update(
+                {
+                    "api": session["api"],
+                    "action": dict(session["action"]),
+                    "shader": dict(session["shader"]),
+                    "target": dict(session["target"]),
+                    "returned_state_count": len(states),
+                    "states": states,
+                    "meta": {
+                        "completed": bool(session["completed"]),
+                        "has_more": self._shader_debug_has_more(session),
+                    },
+                }
+            )
+
+        self._block_invoke_checked(callback)
+        return response
+
+    def _get_shader_debug_step(self, shader_debug_id, step_index, change_limit):
+        self._ensure_capture_loaded()
+        session = self._get_shader_debug_session(shader_debug_id)
+        state = session["history_by_step"].get(int(step_index))
+        if state is None:
+            raise BridgeError(
+                "shader_debug_trace_unavailable",
+                "The requested shader debug step has not been fetched yet.",
+                {
+                    "shader_debug_id": session["shader_debug_id"],
+                    "requested_step_index": int(step_index),
+                    "completed": bool(session["completed"]),
+                },
+            )
+        return self._serialize_shader_debug_step_payload(session, state, change_limit)
+
+    def _end_shader_debug(self, shader_debug_id):
+        self._ensure_capture_loaded()
+        response = {"shader_debug_id": str(shader_debug_id or ""), "closed": True}
+
+        def callback(controller):
+            session = self._release_shader_debug_session(controller, shader_debug_id)
+            response["event_id"] = session["event_id"]
+
+        self._block_invoke_checked(callback)
+        return response
 
     def _get_pixel_history(self, texture_id, x, y, mip_level, array_slice, sample, cursor, limit):
         payload = self._pixel_history_payload(texture_id, x, y, mip_level, array_slice, sample)

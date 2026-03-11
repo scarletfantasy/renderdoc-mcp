@@ -17,6 +17,10 @@ DEFAULT_BUFFER_READ_SIZE = 256
 MAX_BUFFER_READ_SIZE = 4096
 MAX_TEXTURE_PREVIEW_DIMENSION = 64
 MAX_TEXTURE_PREVIEW_PIXELS = 1024
+DEFAULT_SHADER_DEBUG_STATE_LIMIT = 32
+MAX_SHADER_DEBUG_STATE_LIMIT = 128
+DEFAULT_SHADER_DEBUG_CHANGE_LIMIT = 64
+MAX_SHADER_DEBUG_CHANGE_LIMIT = 256
 SUPPORTED_TEXTURE_EXPORT_TYPES = {
     ".dds": "DDS",
     ".hdr": "HDR",
@@ -127,6 +131,74 @@ class ResourceHandlers:
     ) -> dict[str, Any]:
         params = self._normalize_pixel_params(texture_id, x, y, mip_level, array_slice, sample)
         session, result = self.context.capture_tool(capture_id, "debug_pixel", params)
+        return attach_capture(ensure_meta(result), session)
+
+    def renderdoc_start_pixel_shader_debug(
+        self,
+        capture_id: str,
+        event_id: int,
+        x: int,
+        y: int,
+        texture_id: str | None = None,
+        sample: int | str | None = None,
+        primitive_id: int | str | None = None,
+        view: int | str | None = None,
+        state_limit: int | str | None = None,
+    ) -> dict[str, Any]:
+        params = {
+            "event_id": self.context.normalize_required_int(event_id, "event_id"),
+            "x": self.context.normalize_non_negative_int(x, "x"),
+            "y": self.context.normalize_non_negative_int(y, "y"),
+            "state_limit": self._normalize_state_limit(state_limit),
+        }
+        normalized_texture_id = self.context.normalize_optional_string(texture_id)
+        if normalized_texture_id:
+            params["texture_id"] = normalized_texture_id
+
+        normalized_sample = self._normalize_optional_non_negative_int(sample, "sample")
+        normalized_primitive_id = self._normalize_optional_non_negative_int(primitive_id, "primitive_id")
+        normalized_view = self._normalize_optional_non_negative_int(view, "view")
+        if normalized_sample is not None:
+            params["sample"] = normalized_sample
+        if normalized_primitive_id is not None:
+            params["primitive_id"] = normalized_primitive_id
+        if normalized_view is not None:
+            params["view"] = normalized_view
+
+        session, result = self.context.capture_tool(capture_id, "start_pixel_shader_debug", params)
+        return attach_capture(ensure_meta(result), session)
+
+    def renderdoc_continue_shader_debug(
+        self,
+        capture_id: str,
+        shader_debug_id: str,
+        state_limit: int | str | None = None,
+    ) -> dict[str, Any]:
+        params = {
+            "shader_debug_id": self.context.normalize_required_string(shader_debug_id, "shader_debug_id"),
+            "state_limit": self._normalize_state_limit(state_limit),
+        }
+        session, result = self.context.capture_tool(capture_id, "continue_shader_debug", params)
+        return attach_capture(ensure_meta(result), session)
+
+    def renderdoc_get_shader_debug_step(
+        self,
+        capture_id: str,
+        shader_debug_id: str,
+        step_index: int,
+        change_limit: int | str | None = None,
+    ) -> dict[str, Any]:
+        params = {
+            "shader_debug_id": self.context.normalize_required_string(shader_debug_id, "shader_debug_id"),
+            "step_index": self.context.normalize_non_negative_int(step_index, "step_index"),
+            "change_limit": self._normalize_change_limit(change_limit),
+        }
+        session, result = self.context.capture_tool(capture_id, "get_shader_debug_step", params)
+        return attach_capture(ensure_meta(result), session)
+
+    def renderdoc_end_shader_debug(self, capture_id: str, shader_debug_id: str) -> dict[str, Any]:
+        params = {"shader_debug_id": self.context.normalize_required_string(shader_debug_id, "shader_debug_id")}
+        session, result = self.context.capture_tool(capture_id, "end_shader_debug", params)
         return attach_capture(ensure_meta(result), session)
 
     def renderdoc_get_texture_data(
@@ -245,3 +317,29 @@ class ResourceHandlers:
             "array_slice": self.context.normalize_non_negative_int(array_slice, "array_slice"),
             "sample": self.context.normalize_non_negative_int(sample, "sample"),
         }
+
+    def _normalize_optional_non_negative_int(self, value: Any, field_name: str) -> int | None:
+        normalized = self.context.normalize_optional_int(value, field_name)
+        if normalized is None:
+            return None
+        if normalized < 0:
+            raise ReplayFailureError(f"{field_name} must be greater than or equal to 0.", {field_name: normalized})
+        return normalized
+
+    def _normalize_state_limit(self, value: Any) -> int:
+        normalized = self.context.normalize_optional_int(value, "state_limit") or DEFAULT_SHADER_DEBUG_STATE_LIMIT
+        if normalized <= 0 or normalized > MAX_SHADER_DEBUG_STATE_LIMIT:
+            raise ReplayFailureError(
+                "state_limit must be between 1 and {}.".format(MAX_SHADER_DEBUG_STATE_LIMIT),
+                {"state_limit": normalized},
+            )
+        return normalized
+
+    def _normalize_change_limit(self, value: Any) -> int:
+        normalized = self.context.normalize_optional_int(value, "change_limit") or DEFAULT_SHADER_DEBUG_CHANGE_LIMIT
+        if normalized <= 0 or normalized > MAX_SHADER_DEBUG_CHANGE_LIMIT:
+            raise ReplayFailureError(
+                "change_limit must be between 1 and {}.".format(MAX_SHADER_DEBUG_CHANGE_LIMIT),
+                {"change_limit": normalized},
+            )
+        return normalized
