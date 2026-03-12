@@ -7,7 +7,9 @@ Language: [English](#en) | [简体中文](#zh-cn)
 
 `renderdoc-mcp` is a local stdio MCP server for inspecting existing RenderDoc `.rdc` captures on Windows.
 
-It launches `qrenderdoc.exe`, installs a bundled RenderDoc Python extension into `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge`, and bridges MCP tool calls to RenderDoc's embedded Python API over a localhost socket.
+By default it launches `qrenderdoc.exe`, installs a bundled RenderDoc Python extension into `%APPDATA%\qrenderdoc\extensions\renderdoc_mcp_bridge`, and bridges MCP tool calls to RenderDoc's embedded Python API over a localhost socket.
+
+It also supports an optional `native_python` backend that runs a standalone `renderdoc.pyd` inside a helper Python process. This backend requires a source-built RenderDoc Python module and is not available from the default RenderDoc installer.
 
 This repository now exposes an AI-first v2 MCP surface:
 
@@ -348,9 +350,13 @@ uv run renderdoc-mcp
 
 ## Environment
 
+- `RENDERDOC_BACKEND`: backend to use, `qrenderdoc` (default) or `native_python`
 - `RENDERDOC_QRENDERDOC_PATH`: override the default `qrenderdoc.exe` path
-- `RENDERDOC_BRIDGE_TIMEOUT_SECONDS`: handshake timeout for launching qrenderdoc, default `30`
+- `RENDERDOC_BRIDGE_TIMEOUT_SECONDS`: handshake timeout for launching the configured backend, default `30`
 - `RENDERDOC_CAPTURE_SESSION_IDLE_SECONDS`: idle timeout for per-capture sessions, default `300`; set to `0` or a negative value to disable idle eviction
+- `RENDERDOC_NATIVE_MODULE_DIR`: directory containing a standalone source-built `renderdoc.pyd` when `RENDERDOC_BACKEND=native_python`
+- `RENDERDOC_NATIVE_PYTHON_EXE`: Python executable used for the helper process in `native_python` mode; defaults to the current Python executable
+- `RENDERDOC_NATIVE_DLL_DIR`: DLL directory for the native helper; defaults to `RENDERDOC_NATIVE_MODULE_DIR`
 
 <a id="zh-cn"></a>
 ## 简体中文

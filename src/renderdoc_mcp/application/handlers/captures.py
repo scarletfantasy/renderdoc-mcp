@@ -12,7 +12,7 @@ from renderdoc_mcp.analysis.frame_analysis import (
     PASS_SORT_OPTIONS,
 )
 from renderdoc_mcp.application.context import ApplicationContext
-from renderdoc_mcp.application.response import attach_capture, ensure_meta
+from renderdoc_mcp.application.response import attach_capture, bridge_meta, ensure_meta, runtime_meta
 from renderdoc_mcp.errors import ReplayFailureError
 
 SUPPORTED_PASS_CATEGORIES = set(PASS_CATEGORIES)
@@ -43,7 +43,7 @@ class CaptureHandlers:
             "capture_id": session.capture_id,
             "capture_path": session.capture_path,
             "closed": True,
-            "meta": {},
+            "meta": bridge_meta(session),
         }
 
     def renderdoc_get_capture_overview(self, capture_id: str) -> dict[str, Any]:
@@ -175,7 +175,7 @@ class CaptureHandlers:
             path = Path(raw_path)
             captures.append({"path": str(path), "exists": path.is_file()})
 
-        return {"recent_captures": captures, "count": len(captures), "meta": {}}
+        return {"recent_captures": captures, "count": len(captures), "meta": runtime_meta()}
 
     def renderdoc_capture_overview_resource(self, capture_id: str) -> dict[str, Any]:
         return self.renderdoc_get_capture_overview(capture_id)

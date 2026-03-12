@@ -10,8 +10,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, Protocol, TextIO
 
+from renderdoc_mcp.backend import DEFAULT_BACKEND, NATIVE_PYTHON_BACKEND, current_backend_name
 from renderdoc_mcp.errors import (
     BridgeDisconnectedError,
     BridgeHandshakeTimeoutError,
@@ -22,6 +23,20 @@ from renderdoc_mcp.errors import (
 )
 from renderdoc_mcp.paths import resolve_qrenderdoc_path
 from renderdoc_mcp.protocol import BRIDGE_PROTOCOL_VERSION, close_socket, read_message, send_message
+
+
+class RenderDocBridge(Protocol):
+    backend_name: str
+    renderdoc_version: str | None
+
+    def ensure_capture_loaded(self, capture_path: str) -> dict[str, Any]:
+        ...
+
+    def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]:
+        ...
+
+    def close(self) -> None:
+        ...
 
 
 def _env_float(name: str, default: float) -> float:
@@ -36,6 +51,8 @@ def _env_float(name: str, default: float) -> float:
 
 class QRenderDocBridge:
     """Owns the qrenderdoc process handshake and request/response socket."""
+
+    backend_name = DEFAULT_BACKEND
 
     def __init__(self, timeout_seconds: float | None = None) -> None:
         self.timeout_seconds = timeout_seconds or _env_float("RENDERDOC_BRIDGE_TIMEOUT_SECONDS", 30.0)
@@ -254,3 +271,13 @@ class QRenderDocBridge:
             self.close()
             raise BridgeDisconnectedError()
         raise RenderDocMCPError(str(code or "replay_failure"), message, details)
+
+
+def create_default_bridge() -> RenderDocBridge:
+    backend = current_backend_name()
+    if backend == NATIVE_PYTHON_BACKEND:
+        from renderdoc_mcp.native_bridge import NativePythonBridge
+
+        return NativePythonBridge()
+
+    return QRenderDocBridge()

@@ -5,7 +5,27 @@ except Exception:
 
 
 def _enum_name(value):
-    return str(value).split(".")[-1]
+    if value is None:
+        return ""
+
+    name = getattr(value, "name", None)
+    if isinstance(name, str) and name:
+        return name
+
+    repr_text = repr(value)
+    if repr_text.startswith("<") and repr_text.endswith(">") and ":" in repr_text:
+        enum_path = repr_text[1:-1].split(":", 1)[0].strip()
+        if "." in enum_path:
+            candidate = enum_path.split(".", 1)[1].strip()
+        else:
+            candidate = enum_path
+        if candidate:
+            return candidate
+
+    text = str(value)
+    if "." in text:
+        return text.split(".")[-1]
+    return text
 
 
 def _resource_id(value):

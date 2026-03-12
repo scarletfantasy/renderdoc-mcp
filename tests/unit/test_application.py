@@ -15,6 +15,7 @@ class DummyBridge:
         self.loaded: list[str] = []
         self.calls: list[tuple[str, dict]] = []
         self.closed = 0
+        self.backend_name = "qrenderdoc"
         self.renderdoc_version = "1.43"
 
     def ensure_capture_loaded(self, capture_path: str):
@@ -302,7 +303,7 @@ def test_open_capture_returns_capture_id_and_overview(tmp_path: Path) -> None:
     assert response["capture_path"] == capture_path
     assert response["api"] == "D3D12"
     assert response["root_pass_count"] == 1
-    assert response["meta"] == {"renderdoc_version": "1.43"}
+    assert response["meta"] == {"backend": "qrenderdoc", "renderdoc_version": "1.43"}
     assert created[0].loaded == [capture_path]
     assert created[0].calls == [("get_capture_overview", {})]
 
@@ -317,6 +318,7 @@ def test_handlers_reuse_capture_id_session_and_attach_meta(tmp_path: Path) -> No
     pipeline = application.actions.renderdoc_get_pipeline_overview(opened["capture_id"], event_id="42")
 
     assert actions["capture_id"] == opened["capture_id"]
+    assert actions["meta"]["backend"] == "qrenderdoc"
     assert actions["meta"]["renderdoc_version"] == "1.43"
     assert actions["meta"]["page"]["cursor"] == "10"
     assert passes["meta"]["page"]["limit"] == 5
@@ -338,6 +340,8 @@ def test_close_capture_invalidates_session(tmp_path: Path) -> None:
     closed = application.captures.renderdoc_close_capture(opened["capture_id"])
 
     assert closed["closed"] is True
+    assert closed["meta"]["backend"] == "qrenderdoc"
+    assert closed["meta"]["renderdoc_version"] == "1.43"
     assert created[0].closed == 1
     with pytest.raises(InvalidCaptureIDError):
         application.captures.renderdoc_get_capture_overview(opened["capture_id"])
@@ -450,3 +454,16 @@ def test_registry_contains_new_breaking_api_surface() -> None:
         "renderdoc_end_shader_debug",
     }.issubset(tool_names)
     assert "renderdoc://capture/{capture_id}/overview" in resource_uris
+
+
+def test_recent_captures_reports_backend_meta(tmp_path: Path, monkeypatch) -> None:
+    application, _ = _application()
+    config_path = tmp_path / "UI.config"
+    config_path.write_text('{"RecentCaptureFiles":["C:\\\\captures\\\\sample.rdc"]}', encoding="utf-8")
+
+    monkeypatch.setattr("renderdoc_mcp.application.context.ui_config_path", lambda: config_path)
+
+    response = application.captures.renderdoc_recent_captures()
+
+    assert response["count"] == 1
+    assert response["meta"] == {"backend": "qrenderdoc"}

@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from functools import lru_cache
 from typing import Callable, Iterator
 
-from renderdoc_mcp.bridge import QRenderDocBridge
+from renderdoc_mcp.bridge import RenderDocBridge, create_default_bridge
 from renderdoc_mcp.uri import create_capture_id
 
 
@@ -27,7 +27,7 @@ def _env_float(name: str, default: float) -> float:
 class CaptureSession:
     capture_id: str
     capture_path: str
-    bridge: QRenderDocBridge
+    bridge: RenderDocBridge
     last_used_monotonic: float
     in_use_count: int = 0
 
@@ -36,7 +36,7 @@ class CaptureSessionPool:
     def __init__(
         self,
         idle_timeout_seconds: float | None = None,
-        bridge_factory: Callable[[], QRenderDocBridge] | None = None,
+        bridge_factory: Callable[[], RenderDocBridge] | None = None,
         monotonic: Callable[[], float] | None = None,
     ) -> None:
         self.idle_timeout_seconds = (
@@ -44,7 +44,7 @@ class CaptureSessionPool:
             if idle_timeout_seconds is not None
             else _env_float("RENDERDOC_CAPTURE_SESSION_IDLE_SECONDS", 300.0)
         )
-        self._bridge_factory = bridge_factory or QRenderDocBridge
+        self._bridge_factory = bridge_factory or create_default_bridge
         self._monotonic = monotonic or time.monotonic
         self._lock = threading.RLock()
         self._sessions: dict[str, CaptureSession] = {}

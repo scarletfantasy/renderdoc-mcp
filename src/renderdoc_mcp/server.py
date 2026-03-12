@@ -20,7 +20,7 @@ app = FastMCP(
     instructions=(
         "Use renderdoc_open_capture first, then pass the returned capture_id to the other tools. "
         "Start with renderdoc_get_capture_overview or renderdoc_get_analysis_worklist, then drill down with paged list tools. "
-        "The server launches qrenderdoc as needed and keeps each open capture session alive until closed or evicted."
+        "The server launches the configured RenderDoc backend as needed and keeps each open capture session alive until closed or evicted."
     ),
 )
 

@@ -36,6 +36,43 @@ class RenderDocNotInstalledError(RenderDocMCPError):
         )
 
 
+class InvalidBackendError(RenderDocMCPError):
+    def __init__(self, backend: str, supported_backends: list[str]) -> None:
+        super().__init__(
+            "invalid_backend",
+            "RENDERDOC_BACKEND must be one of {}.".format(", ".join(supported_backends)),
+            {"backend": backend, "supported_backends": supported_backends},
+        )
+
+
+class NativePythonNotConfiguredError(RenderDocMCPError):
+    def __init__(self, missing_env_var: str) -> None:
+        super().__init__(
+            "native_python_not_configured",
+            "The native RenderDoc Python backend is not configured.",
+            {"missing_env_var": missing_env_var},
+        )
+
+
+class NativePythonModuleNotFoundError(RenderDocMCPError):
+    def __init__(self, checked_path: str, kind: str = "renderdoc_module") -> None:
+        super().__init__(
+            "native_python_module_not_found",
+            "The native RenderDoc Python backend files could not be found.",
+            {"checked_path": checked_path, "kind": kind},
+        )
+
+
+class NativePythonImportError(RenderDocMCPError):
+    def __init__(self, message: str, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__("native_python_import_failed", message, details)
+
+
+class NativeHelperStartupError(RenderDocMCPError):
+    def __init__(self, message: str, details: Mapping[str, Any] | None = None) -> None:
+        super().__init__("native_helper_startup_failed", message, details)
+
+
 class CapturePathError(RenderDocMCPError):
     def __init__(self, capture_path: str) -> None:
         super().__init__(

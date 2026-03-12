@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -9,6 +10,7 @@ from renderdoc_mcp import bridge as bridge_module
 from renderdoc_mcp.errors import BridgeHandshakeTimeoutError
 from renderdoc_mcp.bridge import QRenderDocBridge
 from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge import client as bridge_client_module
+from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge import serialization as serialization_module
 from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge.client import BridgeClient
 
 
@@ -182,6 +184,14 @@ class FakeUInt32DebugPixelInputs:
         self._view = int(value)
 
 
+class _EnumGraphicsAPI(Enum):
+    D3D12 = 1
+
+
+class _EnumTopology(Enum):
+    Unknown = 0
+
+
 def _shader_variable(name: str, values: list[float], type_name: str = "Float") -> SimpleNamespace:
     return SimpleNamespace(
         name=name,
@@ -285,6 +295,37 @@ def test_bridge_client_pipeline_overview_gracefully_handles_missing_descriptor_a
     assert response["pipeline"]["available"] is True
     assert response["pipeline"]["counts"]["descriptor_accesses"] == 0
     assert response["pipeline"]["graphics_pipeline_object"] == ""
+
+
+def test_enum_name_uses_python_enum_names_for_native_renderdoc_bindings() -> None:
+    assert serialization_module._enum_name(_EnumGraphicsAPI.D3D12) == "D3D12"
+    assert serialization_module._enum_name(_EnumTopology.Unknown) == "Unknown"
+
+
+def test_bridge_client_pipeline_overview_uses_enum_names_for_api_and_topology() -> None:
+    class EnumState(FakeState):
+        def GetPrimitiveTopology(self):
+            return _EnumTopology.Unknown
+
+    class EnumController(FakeController):
+        def __init__(self) -> None:
+            super().__init__(api_name=_EnumGraphicsAPI.D3D12, state=EnumState())
+
+        def GetD3D12PipelineState(self):
+            return SimpleNamespace(
+                pipelineResourceId="pipe-1",
+                descriptorHeaps=[],
+                rootSignature=SimpleNamespace(resourceId=None, parameters=[], staticSamplers=[]),
+            )
+
+    client = BridgeClient(FakeContext(EnumController()))
+
+    response = client._get_pipeline_overview(7)
+
+    assert response["api"] == "D3D12"
+    assert response["pipeline"]["topology"] == "Unknown"
+    assert response["pipeline"]["api_details_available"] is True
+    assert response["pipeline"]["api_details_api"] == "D3D12"
 
 
 def test_bridge_client_pipeline_bindings_degrades_when_accessor_signature_changes() -> None:
