@@ -11,6 +11,7 @@ from renderdoc_mcp.analysis.frame_analysis import (
     PASS_CATEGORIES,
     PASS_SORT_OPTIONS,
 )
+from renderdoc_mcp.application.command_specs import OpenCaptureCommand
 from renderdoc_mcp.application.context import ApplicationContext
 from renderdoc_mcp.application.response import attach_capture, bridge_meta, ensure_meta, runtime_meta
 from renderdoc_mcp.errors import ReplayFailureError
@@ -27,12 +28,13 @@ class CaptureHandlers:
         self.context = context
 
     def renderdoc_open_capture(self, capture_path: str) -> dict[str, Any]:
-        session = self.context.open_capture(capture_path)
+        command = OpenCaptureCommand.from_raw(self.context.normalizer, capture_path)
+        session = self.context.sessions.open_normalized_capture(command.capture_path)
         try:
             session.bridge.ensure_capture_loaded(session.capture_path)
             overview = ensure_meta(session.bridge.call("get_capture_overview"))
         except Exception:
-            self.context.close_capture(session.capture_id)
+            self.context.sessions.close_normalized_capture(session.capture_id)
             raise
         return attach_capture(overview, session)
 

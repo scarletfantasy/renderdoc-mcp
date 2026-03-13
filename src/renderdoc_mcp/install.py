@@ -12,15 +12,7 @@ from renderdoc_mcp.paths import extension_install_dir, ui_config_path, user_qren
 EXTENSION_PACKAGE = "renderdoc_mcp.qrenderdoc_extension"
 EXTENSION_NAME = "renderdoc_mcp_bridge"
 SHARED_ANALYSIS_PACKAGE = "renderdoc_mcp.analysis"
-SHARED_ANALYSIS_MODULES = [
-    "frame_analysis.py",
-    "models.py",
-    "action_listing.py",
-    "pass_classification.py",
-    "resource_usage.py",
-    "timing.py",
-    "hotspots.py",
-]
+SHARED_ANALYSIS_TARGET_DIR = "analysis"
 INSTALL_METADATA_FILENAME = ".renderdoc_mcp_install.json"
 TRUE_LIKE_VALUES = {"1", "true", "yes", "on"}
 FALSE_LIKE_VALUES = {"0", "false", "no", "off"}
@@ -64,7 +56,7 @@ def _build_install_metadata() -> dict[str, object]:
     with resources.as_file(source_root) as source_dir:
         for source_path in sorted(path for path in source_dir.rglob("*") if path.is_file()):
             relative_path = source_path.relative_to(source_dir).as_posix()
-            if relative_path in SHARED_ANALYSIS_MODULES:
+            if relative_path.startswith(SHARED_ANALYSIS_TARGET_DIR + "/"):
                 continue
             installed_files.append(relative_path)
             digest.update(relative_path.encode("utf-8"))
@@ -72,13 +64,15 @@ def _build_install_metadata() -> dict[str, object]:
             digest.update(source_path.read_bytes())
             digest.update(b"\0")
 
-    for module_name in SHARED_ANALYSIS_MODULES:
-        source_module = resources.files(SHARED_ANALYSIS_PACKAGE).joinpath(module_name)
-        with resources.as_file(source_module) as source_file:
-            installed_files.append(module_name)
-            digest.update(module_name.encode("utf-8"))
+    analysis_root = resources.files(SHARED_ANALYSIS_PACKAGE)
+    with resources.as_file(analysis_root) as source_dir:
+        for source_path in sorted(path for path in source_dir.rglob("*") if path.is_file()):
+            relative_path = source_path.relative_to(source_dir).as_posix()
+            install_path = "{}/{}".format(SHARED_ANALYSIS_TARGET_DIR, relative_path)
+            installed_files.append(install_path)
+            digest.update(install_path.encode("utf-8"))
             digest.update(b"\0")
-            digest.update(source_file.read_bytes())
+            digest.update(source_path.read_bytes())
             digest.update(b"\0")
 
     return {
@@ -128,7 +122,7 @@ def _copy_extension_files(target_dir: Path) -> None:
     source_root = resources.files(EXTENSION_PACKAGE).joinpath(EXTENSION_NAME)
     with resources.as_file(source_root) as source_dir:
         _copy_tree(source_dir, target_dir)
-    _sync_shared_analysis(target_dir)
+    _sync_shared_analysis_package(target_dir)
 
 
 def install_extension(always_load: bool | None = None) -> Path:
@@ -145,11 +139,11 @@ def install_extension(always_load: bool | None = None) -> Path:
     return target_dir
 
 
-def _sync_shared_analysis(target_dir: Path) -> None:
-    for module_name in SHARED_ANALYSIS_MODULES:
-        source_module = resources.files(SHARED_ANALYSIS_PACKAGE).joinpath(module_name)
-        with resources.as_file(source_module) as source_file:
-            shutil.copy2(source_file, target_dir / module_name)
+def _sync_shared_analysis_package(target_dir: Path) -> None:
+    source_root = resources.files(SHARED_ANALYSIS_PACKAGE)
+    destination = target_dir / SHARED_ANALYSIS_TARGET_DIR
+    with resources.as_file(source_root) as source_dir:
+        _copy_tree(source_dir, destination)
 
 
 def _ensure_always_load(config_path: Path | None = None) -> bool:

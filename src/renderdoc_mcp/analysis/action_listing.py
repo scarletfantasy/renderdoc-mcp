@@ -1,19 +1,10 @@
-try:
-    from .models import (
-        DEFAULT_ACTION_PAGE_LIMIT,
-        LEGACY_ACTION_LIST_NODE_LIMIT,
-        PageInfo,
-        with_meta,
-    )
-    from .pass_classification import action_summary, compact_action_entry
-except Exception:
-    from models import (
-        DEFAULT_ACTION_PAGE_LIMIT,
-        LEGACY_ACTION_LIST_NODE_LIMIT,
-        PageInfo,
-        with_meta,
-    )
-    from pass_classification import action_summary, compact_action_entry
+from .models import (
+    DEFAULT_ACTION_PAGE_LIMIT,
+    LEGACY_ACTION_LIST_NODE_LIMIT,
+    PageInfo,
+    with_meta,
+)
+from .pass_classification import action_summary, compact_action_entry
 
 
 def build_action_tree_result(nodes, total_count, max_depth=None, name_filter=None, limit=None):

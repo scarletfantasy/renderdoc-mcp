@@ -1,69 +1,35 @@
-try:
-    from .resource_usage import RESOURCE_USAGE_KINDS, build_resource_usage_overview, list_resource_usages
-    from .action_listing import (
-        build_action_children_result,
-        build_action_list_result,
-        build_action_summary_result,
-        build_action_tree_result,
-    )
-    from .hotspots import build_performance_hotspots
-    from .models import (
-        DEFAULT_ACTION_PAGE_LIMIT,
-        DEFAULT_PASS_PAGE_LIMIT,
-        DEFAULT_TIMING_EVENT_PAGE_LIMIT,
-        HOTSPOT_LIMIT,
-        LEGACY_ACTION_LIST_NODE_LIMIT,
-        MAX_PAGE_LIMIT,
-        MAX_TIMING_EVENT_PAGE_LIMIT,
-        PASS_CATEGORIES,
-        PASS_SORT_OPTIONS,
-        TOP_PASS_RANKING_LIMIT,
-        AnalysisCache,
-    )
-    from .pass_classification import (
-        action_summary,
-        build_frame_analysis,
-        compact_action_entry,
-        get_pass_details,
-        get_pass_summary,
-        pass_id_from_range,
-        pass_list_entry,
-        pass_summary,
-    )
-    from .timing import build_analysis_result, build_timing_result, list_passes, list_timing_events
-except Exception:
-    from resource_usage import RESOURCE_USAGE_KINDS, build_resource_usage_overview, list_resource_usages
-    from action_listing import (
-        build_action_children_result,
-        build_action_list_result,
-        build_action_summary_result,
-        build_action_tree_result,
-    )
-    from hotspots import build_performance_hotspots
-    from models import (
-        DEFAULT_ACTION_PAGE_LIMIT,
-        DEFAULT_PASS_PAGE_LIMIT,
-        DEFAULT_TIMING_EVENT_PAGE_LIMIT,
-        HOTSPOT_LIMIT,
-        LEGACY_ACTION_LIST_NODE_LIMIT,
-        MAX_PAGE_LIMIT,
-        MAX_TIMING_EVENT_PAGE_LIMIT,
-        PASS_CATEGORIES,
-        PASS_SORT_OPTIONS,
-        TOP_PASS_RANKING_LIMIT,
-        AnalysisCache,
-    )
-    from pass_classification import (
-        action_summary,
-        build_frame_analysis,
-        compact_action_entry,
-        get_pass_details,
-        get_pass_summary,
-        pass_id_from_range,
-        pass_list_entry,
-        pass_summary,
-    )
-    from timing import build_analysis_result, build_timing_result, list_passes, list_timing_events
+from .action_listing import (
+    build_action_children_result,
+    build_action_list_result,
+    build_action_summary_result,
+    build_action_tree_result,
+)
+from .hotspots import build_performance_hotspots
+from .models import (
+    DEFAULT_ACTION_PAGE_LIMIT,
+    DEFAULT_PASS_PAGE_LIMIT,
+    DEFAULT_TIMING_EVENT_PAGE_LIMIT,
+    HOTSPOT_LIMIT,
+    LEGACY_ACTION_LIST_NODE_LIMIT,
+    MAX_PAGE_LIMIT,
+    MAX_TIMING_EVENT_PAGE_LIMIT,
+    PASS_CATEGORIES,
+    PASS_SORT_OPTIONS,
+    TOP_PASS_RANKING_LIMIT,
+    AnalysisCache,
+)
+from .pass_classification import (
+    action_summary,
+    build_frame_analysis,
+    compact_action_entry,
+    get_pass_details,
+    get_pass_summary,
+    pass_id_from_range,
+    pass_list_entry,
+    pass_summary,
+)
+from .resource_usage import RESOURCE_USAGE_KINDS, build_resource_usage_overview, list_resource_usages
+from .timing import build_analysis_result, build_timing_result, list_passes, list_timing_events
 
 __all__ = [
     "AnalysisCache",

@@ -1,7 +1,4 @@
-try:
-    from .models import DEFAULT_ACTION_PAGE_LIMIT, PageInfo, with_meta
-except Exception:
-    from models import DEFAULT_ACTION_PAGE_LIMIT, PageInfo, with_meta
+from .models import DEFAULT_ACTION_PAGE_LIMIT, PageInfo, with_meta
 
 
 RESOURCE_USAGE_KINDS = (

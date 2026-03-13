@@ -1,9 +1,5 @@
-try:
-    from .models import PASS_CATEGORIES, TOP_PASS_RANKING_LIMIT
-    from .resource_usage import build_resource_usage_index
-except Exception:
-    from models import PASS_CATEGORIES, TOP_PASS_RANKING_LIMIT
-    from resource_usage import build_resource_usage_index
+from .models import PASS_CATEGORIES, TOP_PASS_RANKING_LIMIT
+from .resource_usage import build_resource_usage_index
 
 _TAIL_CATEGORIES = {"setup", "copy_resolve", "ui_overlay", "presentation"}
 _GPU_WORK_FLAGS = {"draw", "dispatch", "copy", "resolve", "clear"}

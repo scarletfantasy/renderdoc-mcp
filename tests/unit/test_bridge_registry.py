@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from renderdoc_mcp.application.registry import TOOL_SPECS
 from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge.client import BridgeClient
 
 
@@ -32,3 +33,11 @@ def test_bridge_client_registers_v2_handler_registry() -> None:
         "end_shader_debug",
         "close_capture",
     }.issubset(set(client.handlers))
+
+
+def test_bridge_client_handlers_cover_registered_tool_bridge_methods() -> None:
+    client = BridgeClient(FakeContext())
+
+    bridge_methods = {spec.bridge_method for spec in TOOL_SPECS}
+
+    assert bridge_methods.issubset(set(client.handlers))

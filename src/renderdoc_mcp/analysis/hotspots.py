@@ -1,11 +1,6 @@
-try:
-    from .models import HOTSPOT_LIMIT, with_meta
-    from .pass_classification import index_action_nodes, pass_summary
-    from .timing import normalize_timing_payload, timed_event_entry, timing_info_from_payload
-except Exception:
-    from models import HOTSPOT_LIMIT, with_meta
-    from pass_classification import index_action_nodes, pass_summary
-    from timing import normalize_timing_payload, timed_event_entry, timing_info_from_payload
+from .models import HOTSPOT_LIMIT, with_meta
+from .pass_classification import index_action_nodes, pass_summary
+from .timing import normalize_timing_payload, timed_event_entry, timing_info_from_payload
 
 
 def build_performance_hotspots(

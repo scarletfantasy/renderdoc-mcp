@@ -11,22 +11,20 @@ from renderdoc_mcp.bootstrap import prepare_runtime
 
 @lru_cache(maxsize=1)
 def get_application() -> RenderDocApplication:
-    prepare_runtime()
     return RenderDocApplication()
 
 
-app = FastMCP(
-    name="renderdoc-mcp",
-    instructions=(
-        "Use renderdoc_open_capture first, then pass the returned capture_id to the other tools. "
-        "Start with renderdoc_get_capture_overview or renderdoc_get_analysis_worklist, then drill down with paged list tools. "
-        "The server launches the configured RenderDoc backend as needed and keeps each open capture session alive until closed or evicted."
-    ),
-)
+def create_mcp_app(application: RenderDocApplication | None = None) -> FastMCP:
+    application = application or get_application()
+    app = FastMCP(
+        name="renderdoc-mcp",
+        instructions=(
+            "Use renderdoc_open_capture first, then pass the returned capture_id to the other tools. "
+            "Start with renderdoc_get_capture_overview or renderdoc_get_analysis_worklist, then drill down with paged list tools. "
+            "The server launches the configured RenderDoc backend as needed and keeps each open capture session alive until closed or evicted."
+        ),
+    )
 
-
-def _register_registry() -> None:
-    application = get_application()
     for tool in build_tool_registry(application):
         app.add_tool(
             tool.handler,
@@ -43,9 +41,14 @@ def _register_registry() -> None:
             mime_type="application/json",
         )(resource.handler)
 
+    return app
 
-_register_registry()
+
+@lru_cache(maxsize=1)
+def get_mcp_app() -> FastMCP:
+    return create_mcp_app(get_application())
 
 
 def main() -> None:
-    app.run(transport="stdio")
+    prepare_runtime()
+    get_mcp_app().run(transport="stdio")

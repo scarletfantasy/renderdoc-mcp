@@ -1,37 +1,20 @@
 from bisect import bisect_left, bisect_right
 
-try:
-    from .models import (
-        DEFAULT_PASS_PAGE_LIMIT,
-        DEFAULT_TIMING_EVENT_PAGE_LIMIT,
-        MAX_TIMING_EVENT_PAGE_LIMIT,
-        PageInfo,
-        TimingInfo,
-        with_meta,
-    )
-    from .pass_classification import (
-        copy_pass_entry,
-        get_pass_summary,
-        index_action_nodes,
-        pass_list_entry,
-        pass_summary,
-    )
-except Exception:
-    from models import (
-        DEFAULT_PASS_PAGE_LIMIT,
-        DEFAULT_TIMING_EVENT_PAGE_LIMIT,
-        MAX_TIMING_EVENT_PAGE_LIMIT,
-        PageInfo,
-        TimingInfo,
-        with_meta,
-    )
-    from pass_classification import (
-        copy_pass_entry,
-        get_pass_summary,
-        index_action_nodes,
-        pass_list_entry,
-        pass_summary,
-    )
+from .models import (
+    DEFAULT_PASS_PAGE_LIMIT,
+    DEFAULT_TIMING_EVENT_PAGE_LIMIT,
+    MAX_TIMING_EVENT_PAGE_LIMIT,
+    PageInfo,
+    TimingInfo,
+    with_meta,
+)
+from .pass_classification import (
+    copy_pass_entry,
+    get_pass_summary,
+    index_action_nodes,
+    pass_list_entry,
+    pass_summary,
+)
 
 
 def build_analysis_result(

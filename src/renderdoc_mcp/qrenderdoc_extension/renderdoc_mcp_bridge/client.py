@@ -11,52 +11,48 @@ try:
 except Exception:
     rd = None
 
+def _bootstrap_log(message):
+    log_path = os.environ.get("RENDERDOC_MCP_BRIDGE_LOG")
+    if not log_path:
+        log_path = os.path.join(os.environ.get("TEMP", os.environ.get("TMP", ".")), "renderdoc_mcp_bridge_default.log")
+    try:
+        with open(log_path, "a") as handle:
+            handle.write("[{}] {}\n".format(time.strftime("%Y-%m-%d %H:%M:%S"), message))
+    except Exception:
+        pass
+
 try:
-    from . import frame_analysis
-    from .serialization import (
-        _action_flags,
-        _api_name,
-        _count_actions,
-        _enum_name,
-        _float_vector,
-        _resource_id,
-        _serialize_action,
-        _serialize_action_analysis_node,
-        _serialize_bound_vbuffer,
-        _serialize_buffer,
-        _serialize_descriptor,
-        _serialize_descriptor_access,
-        _serialize_d3d12_pipeline_state,
-        _serialize_shader_stage,
-        _serialize_texture,
-        _serialize_vertex_input,
-        _serialize_vulkan_pipeline_state,
-        _shader_stage_values,
-    )
-    from .transport import _WinSockClient, _log
+    from .analysis import frame_analysis
+    from .action_ops import ActionOps
+    from .capture_ops import CaptureOps
+    from .resource_ops import ResourceOps
+    from .runtime import BridgeRuntime
+    from .shader_debug_ops import ShaderDebugOps
 except Exception:
-    import frame_analysis
-    from serialization import (
-        _action_flags,
-        _api_name,
-        _count_actions,
-        _enum_name,
-        _float_vector,
-        _resource_id,
-        _serialize_action,
-        _serialize_action_analysis_node,
-        _serialize_bound_vbuffer,
-        _serialize_buffer,
-        _serialize_descriptor,
-        _serialize_descriptor_access,
-        _serialize_d3d12_pipeline_state,
-        _serialize_shader_stage,
-        _serialize_texture,
-        _serialize_vertex_input,
-        _serialize_vulkan_pipeline_state,
-        _shader_stage_values,
-    )
-    from transport import _WinSockClient, _log
+    _bootstrap_log("client.py import failed:\n{}".format(traceback.format_exc()))
+    raise
+
+from .serialization import (
+    _action_flags,
+    _api_name,
+    _count_actions,
+    _enum_name,
+    _float_vector,
+    _resource_id,
+    _serialize_action,
+    _serialize_action_analysis_node,
+    _serialize_bound_vbuffer,
+    _serialize_buffer,
+    _serialize_descriptor,
+    _serialize_descriptor_access,
+    _serialize_d3d12_pipeline_state,
+    _serialize_shader_stage,
+    _serialize_texture,
+    _serialize_vertex_input,
+    _serialize_vulkan_pipeline_state,
+    _shader_stage_values,
+)
+from .transport import _WinSockClient, _log
 
 PROTOCOL_VERSION = 1
 CONNECT_RETRY_SECONDS = 20.0
@@ -131,6 +127,11 @@ def _safe_int(value, default=0):
         return int(value)
     except Exception:
         return int(default)
+
+
+def _hex_bytes_with_spaces(data):
+    hex_text = bytes(data or b"").hex()
+    return " ".join(hex_text[index : index + 2] for index in range(0, len(hex_text), 2))
 
 
 def _call_method_variants(obj, method_name, arg_variants, default=None):
@@ -400,6 +401,9 @@ def _source_variable_names(mappings):
 class BridgeClient(object):
     def __init__(self, ctx, renderdoc_version=""):
         self.ctx = ctx
+        self.PROTOCOL_VERSION = PROTOCOL_VERSION
+        self.CONNECT_RETRY_SECONDS = CONNECT_RETRY_SECONDS
+        self.bridge_error_type = BridgeError
         self.renderdoc_version = str(renderdoc_version or "")
         self.mqt = ctx.Extensions().GetMiniQtHelper()
         self.sock = None
@@ -409,134 +413,51 @@ class BridgeClient(object):
         self.timing_cache = frame_analysis.AnalysisCache()
         self.shader_code_cache = {}
         self.shader_debug_sessions = {}
+        self.runtime = BridgeRuntime(self)
+        self.capture_ops = CaptureOps(self)
+        self.action_ops = ActionOps(self)
+        self.resource_ops = ResourceOps(self)
+        self.shader_debug_ops = ShaderDebugOps(self)
+        self.start = self.runtime.start
+        self.stop = self.runtime.stop
+        self._send = self.runtime._send
+        self._read = self.runtime._read
+        self._invoke_on_ui_thread = self.runtime._invoke_on_ui_thread
+        self._dispatch = self.runtime._dispatch
+        self._run = self.runtime._run
+        self._parse_exception = self.runtime._parse_exception
+        self._load_capture = self.capture_ops._load_capture
+        self._get_capture_overview = self.capture_ops._get_capture_overview
+        self._get_analysis_worklist = self.capture_ops._get_analysis_worklist
+        self._list_passes = self.capture_ops._list_passes
+        self._get_pass_summary = self.capture_ops._get_pass_summary
+        self._list_timing_events = self.capture_ops._list_timing_events
+        self._list_actions = self.action_ops._list_actions
+        self._get_action_summary = self.action_ops._get_action_summary
+        self._get_pipeline_overview = self.action_ops._get_pipeline_overview
+        self._list_pipeline_bindings = self.action_ops._list_pipeline_bindings
+        self._get_shader_summary = self.action_ops._get_shader_summary
+        self._get_shader_code_chunk = self.action_ops._get_shader_code_chunk
+        self._list_resources = self.resource_ops._list_resources
+        self._get_resource_summary = self.resource_ops._get_resource_summary
+        self._list_resource_usages = self.resource_ops._list_resource_usages
+        self._get_pixel_history = self.resource_ops._get_pixel_history
+        self._debug_pixel = self.resource_ops._debug_pixel
+        self._get_texture_data = self.resource_ops._get_texture_data
+        self._get_buffer_data = self.resource_ops._get_buffer_data
+        self._save_texture_to_file = self.resource_ops._save_texture_to_file
+        self._start_pixel_shader_debug = self.shader_debug_ops._start_pixel_shader_debug
+        self._continue_shader_debug = self.shader_debug_ops._continue_shader_debug
+        self._get_shader_debug_step = self.shader_debug_ops._get_shader_debug_step
+        self._end_shader_debug = self.shader_debug_ops._end_shader_debug
+        self._close_capture = self.capture_ops._close_capture
         self.handlers = self._build_handlers()
 
     def _build_handlers(self):
-        return {
-            "load_capture": lambda params: self._load_capture(params.get("capture_path", "")),
-            "get_capture_status": lambda params: self._capture_status(),
-            "get_capture_overview": lambda params: self._get_capture_overview(),
-            "get_analysis_worklist": lambda params: self._get_analysis_worklist(
-                params.get("focus", "performance"),
-                params.get("limit", 10),
-            ),
-            "list_actions": lambda params: self._list_actions(
-                params.get("parent_event_id"),
-                params.get("name_filter"),
-                params.get("flags_filter"),
-                params.get("cursor"),
-                params.get("limit"),
-            ),
-            "list_passes": lambda params: self._list_passes(
-                params.get("parent_pass_id"),
-                params.get("cursor"),
-                params.get("limit"),
-                params.get("category_filter"),
-                params.get("name_filter"),
-                params.get("sort_by", "event_order"),
-            ),
-            "get_pass_summary": lambda params: self._get_pass_summary(params.get("pass_id", "")),
-            "list_timing_events": lambda params: self._list_timing_events(
-                params.get("pass_id", ""),
-                params.get("cursor"),
-                params.get("limit"),
-                params.get("sort_by", "event_order"),
-            ),
-            "get_action_summary": lambda params: self._get_action_summary(int(params.get("event_id", 0))),
-            "get_pipeline_overview": lambda params: self._get_pipeline_overview(int(params.get("event_id", 0))),
-            "list_pipeline_bindings": lambda params: self._list_pipeline_bindings(
-                int(params.get("event_id", 0)),
-                params.get("binding_kind", ""),
-                params.get("cursor"),
-                params.get("limit"),
-            ),
-            "get_shader_summary": lambda params: self._get_shader_summary(
-                int(params.get("event_id", 0)),
-                params.get("stage", ""),
-            ),
-            "get_shader_code_chunk": lambda params: self._get_shader_code_chunk(
-                int(params.get("event_id", 0)),
-                params.get("stage", ""),
-                params.get("target"),
-                params.get("start_line", 1),
-                params.get("line_count", 200),
-            ),
-            "list_resources": lambda params: self._list_resources(
-                params.get("kind", "all"),
-                params.get("cursor"),
-                params.get("limit"),
-                params.get("name_filter"),
-                params.get("sort_by", "name"),
-            ),
-            "get_resource_summary": lambda params: self._get_resource_summary(params.get("resource_id", "")),
-            "list_resource_usages": lambda params: self._list_resource_usages(
-                params.get("resource_id", ""),
-                params.get("usage_kind", "all"),
-                params.get("cursor"),
-                params.get("limit"),
-            ),
-            "get_pixel_history": lambda params: self._get_pixel_history(
-                params.get("texture_id", ""),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                int(params.get("mip_level", 0)),
-                int(params.get("array_slice", 0)),
-                int(params.get("sample", 0)),
-                params.get("cursor"),
-                params.get("limit"),
-            ),
-            "debug_pixel": lambda params: self._debug_pixel(
-                params.get("texture_id", ""),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                int(params.get("mip_level", 0)),
-                int(params.get("array_slice", 0)),
-                int(params.get("sample", 0)),
-            ),
-            "start_pixel_shader_debug": lambda params: self._start_pixel_shader_debug(
-                int(params.get("event_id", 0)),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                params.get("texture_id"),
-                params.get("sample"),
-                params.get("primitive_id"),
-                params.get("view"),
-                int(params.get("state_limit", 32)),
-            ),
-            "continue_shader_debug": lambda params: self._continue_shader_debug(
-                params.get("shader_debug_id", ""),
-                int(params.get("state_limit", 32)),
-            ),
-            "get_shader_debug_step": lambda params: self._get_shader_debug_step(
-                params.get("shader_debug_id", ""),
-                int(params.get("step_index", 0)),
-                int(params.get("change_limit", 64)),
-            ),
-            "end_shader_debug": lambda params: self._end_shader_debug(params.get("shader_debug_id", "")),
-            "get_texture_data": lambda params: self._get_texture_data(
-                params.get("texture_id", ""),
-                int(params.get("mip_level", 0)),
-                int(params.get("x", 0)),
-                int(params.get("y", 0)),
-                int(params.get("width", 0)),
-                int(params.get("height", 0)),
-                int(params.get("array_slice", 0)),
-                int(params.get("sample", 0)),
-            ),
-            "get_buffer_data": lambda params: self._get_buffer_data(
-                params.get("buffer_id", ""),
-                int(params.get("offset", 0)),
-                int(params.get("size", 0)),
-                params.get("encoding", "hex"),
-            ),
-            "save_texture_to_file": lambda params: self._save_texture_to_file(
-                params.get("texture_id", ""),
-                params.get("output_path", ""),
-                int(params.get("mip_level", 0)),
-                int(params.get("array_slice", 0)),
-            ),
-            "close_capture": lambda params: self._close_capture(),
-        }
+        handlers = {}
+        for ops in (self.capture_ops, self.action_ops, self.resource_ops, self.shader_debug_ops):
+            handlers.update(ops.handlers())
+        return handlers
 
     def start(self):
         host = os.environ.get("RENDERDOC_MCP_BRIDGE_HOST")
@@ -2370,9 +2291,9 @@ class BridgeClient(object):
             if str(encoding or "hex").lower() == "base64":
                 response["data"] = base64.b64encode(data).decode("ascii")
             else:
-                response["data"] = data.hex(" ")
+                response["data"] = _hex_bytes_with_spaces(data)
 
-        self.ctx.Replay().BlockInvoke(callback)
+        self._block_invoke_checked(callback)
         return response
 
     def _save_texture_to_file(self, texture_id, output_path, mip_level, array_slice):

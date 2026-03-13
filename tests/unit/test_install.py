@@ -1,6 +1,11 @@
 from __future__ import annotations
 
 import json
+import os
+import shutil
+import subprocess
+import sys
+from importlib import resources
 from pathlib import Path
 
 from renderdoc_mcp import install as install_module
@@ -133,3 +138,38 @@ def test_install_cli_passes_explicit_opt_out(monkeypatch, capsys) -> None:
     assert exit_code == 0
     assert captured == [False]
     assert capsys.readouterr().out.strip() == str(target_path)
+
+
+def test_install_metadata_includes_analysis_package_tree() -> None:
+    metadata = install_module._build_install_metadata()
+
+    assert "analysis/__init__.py" in metadata["files"]
+    assert "analysis/frame_analysis.py" in metadata["files"]
+
+
+def test_repo_time_extension_analysis_shim_is_importable() -> None:
+    from renderdoc_mcp.qrenderdoc_extension.renderdoc_mcp_bridge.analysis import frame_analysis
+
+    assert hasattr(frame_analysis, "AnalysisCache")
+
+
+def test_copied_analysis_package_is_self_contained(tmp_path: Path) -> None:
+    standalone_root = tmp_path / "standalone"
+    analysis_target = standalone_root / "analysis"
+
+    with resources.as_file(resources.files("renderdoc_mcp.analysis")) as source_dir:
+        shutil.copytree(source_dir, analysis_target)
+
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(standalone_root)
+    completed = subprocess.run(
+        [sys.executable, "-c", "import analysis; print(hasattr(analysis, 'AnalysisCache'))"],
+        cwd=standalone_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+    assert completed.stdout.strip() == "True"

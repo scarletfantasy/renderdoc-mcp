@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any
 
 from renderdoc_mcp.analysis.frame_analysis import MAX_PAGE_LIMIT, MAX_TIMING_EVENT_PAGE_LIMIT, RESOURCE_USAGE_KINDS
+from renderdoc_mcp.application.command_specs import GetResourceSummaryCommand
 from renderdoc_mcp.application.context import ApplicationContext
 from renderdoc_mcp.application.response import attach_capture, ensure_meta
 from renderdoc_mcp.errors import ReplayFailureError
@@ -82,11 +83,11 @@ class ResourceHandlers:
         return attach_capture(ensure_meta(result), session)
 
     def renderdoc_get_resource_summary(self, capture_id: str, resource_id: str) -> dict[str, Any]:
-        normalized_resource_id = self.context.normalize_required_string(resource_id, "resource_id")
-        session, result = self.context.capture_tool(
-            capture_id,
+        command = GetResourceSummaryCommand.from_raw(self.context.normalizer, capture_id, resource_id)
+        session, result = self.context.sessions.capture_tool_normalized(
+            command.capture_id,
             "get_resource_summary",
-            {"resource_id": normalized_resource_id},
+            {"resource_id": command.resource_id},
         )
         return attach_capture(ensure_meta(result), session)
 

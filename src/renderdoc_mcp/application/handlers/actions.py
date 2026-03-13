@@ -3,6 +3,7 @@ from __future__ import annotations
 from typing import Any
 
 from renderdoc_mcp.analysis.frame_analysis import DEFAULT_ACTION_PAGE_LIMIT, MAX_PAGE_LIMIT
+from renderdoc_mcp.application.command_specs import ListActionsCommand
 from renderdoc_mcp.application.context import ApplicationContext
 from renderdoc_mcp.application.response import attach_capture, ensure_meta
 from renderdoc_mcp.errors import ReplayFailureError
@@ -66,11 +67,20 @@ class ActionHandlers:
         cursor: int | str | None = None,
         limit: int | str | None = None,
     ) -> dict[str, Any]:
-        normalized_parent_event_id = self.context.normalize_optional_int(parent_event_id, "parent_event_id")
-        normalized_name_filter = self.context.normalize_optional_string(name_filter)
-        normalized_flags_filter = self.context.normalize_optional_string(flags_filter)
-        normalized_cursor = self.context.normalize_optional_int(cursor, "cursor")
-        normalized_limit = self.context.normalize_optional_int(limit, "limit")
+        command = ListActionsCommand.from_raw(
+            self.context.normalizer,
+            capture_id=capture_id,
+            parent_event_id=parent_event_id,
+            name_filter=name_filter,
+            flags_filter=flags_filter,
+            cursor=cursor,
+            limit=limit,
+        )
+        normalized_parent_event_id = command.parent_event_id
+        normalized_name_filter = command.name_filter
+        normalized_flags_filter = command.flags_filter
+        normalized_cursor = command.cursor
+        normalized_limit = command.limit
 
         if normalized_parent_event_id is not None and normalized_parent_event_id <= 0:
             raise ReplayFailureError(
@@ -95,7 +105,7 @@ class ActionHandlers:
         if normalized_cursor is not None:
             params["cursor"] = normalized_cursor
 
-        session, result = self.context.capture_tool(capture_id, "list_actions", params)
+        session, result = self.context.sessions.capture_tool_normalized(command.capture_id, "list_actions", params)
         return attach_capture(ensure_meta(result), session)
 
     def renderdoc_get_action_summary(self, capture_id: str, event_id: int) -> dict[str, Any]:

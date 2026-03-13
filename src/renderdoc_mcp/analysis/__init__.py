@@ -1,6 +1,6 @@
 """Shared analysis logic used by both the MCP server and the qrenderdoc extension."""
 
-from renderdoc_mcp.analysis.frame_analysis import (
+from .frame_analysis import (
     DEFAULT_ACTION_PAGE_LIMIT,
     DEFAULT_PASS_PAGE_LIMIT,
     DEFAULT_TIMING_EVENT_PAGE_LIMIT,

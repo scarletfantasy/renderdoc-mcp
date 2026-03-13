@@ -522,6 +522,45 @@ def test_bridge_client_pixel_shader_debug_converts_no_preference_to_uint32(monke
     assert controller.debug_pixel_calls[0][2].view == 0xFFFFFFFF
 
 
+def test_bridge_client_get_buffer_data_uses_checked_block_invoke(monkeypatch) -> None:
+    controller = FakeController()
+    client = BridgeClient(FakeContext(controller))
+    buffer_desc = SimpleNamespace(resourceId="buf-1", length=4)
+    used_checked_invoke = {"used": False}
+
+    monkeypatch.setattr(client, "_ensure_capture_loaded", lambda: None)
+    monkeypatch.setattr(client, "_ensure_final_event", lambda: None)
+    monkeypatch.setattr(client, "_find_buffer_by_id", lambda buffer_id: buffer_desc)
+    monkeypatch.setattr(
+        client,
+        "_compact_buffer",
+        lambda desc: {
+            "kind": "buffer",
+            "resource_id": str(desc.resourceId),
+            "name": "Buffer",
+            "byte_size": int(desc.length),
+            "usage_flags": "NoFlags",
+        },
+    )
+    monkeypatch.setattr(
+        controller,
+        "GetBufferData",
+        lambda resource_id, offset, size: b"\x00\x01\x7f\xff",
+        raising=False,
+    )
+
+    def fake_block_invoke_checked(callback):
+        used_checked_invoke["used"] = True
+        callback(controller)
+
+    monkeypatch.setattr(client, "_block_invoke_checked", fake_block_invoke_checked)
+
+    payload = BridgeClient._get_buffer_data(client, "buf-1", 0, 4, "hex")
+
+    assert used_checked_invoke["used"] is True
+    assert payload["data"] == "00 01 7f ff"
+
+
 def test_bridge_client_shader_debug_step_requires_cached_history(monkeypatch) -> None:
     controller = FakeController(state=FakeState(shader_bound=True), shader_debugging=True)
     client = BridgeClient(FakeContext(controller))
