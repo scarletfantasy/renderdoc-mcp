@@ -1,5 +1,7 @@
 # renderdoc-mcp
 
+[![Featured by Awesome REA](https://raw.githubusercontent.com/reacher-z/Awesome-REA/main/assets/featured-by-awesome-rea-inline.svg)](https://github.com/reacher-z/Awesome-REA)
+
 Language: [English](#en) | [简体中文](#zh-cn)
 
 <a id="en"></a>
